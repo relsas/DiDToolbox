@@ -19,7 +19,7 @@ Statistics and Machine Learning Toolbox
 ```matlab
 addpath(genpath('/path/to/YourToolbox'))
 
-\*\*Option B (toolbox): Download the .mltbx from the latest GitHub Release and double-click in MATLAB.
+\*\*Option B (toolbox)\*\*: Download the .mltbx from the latest GitHub Release and double-click in MATLAB.
 
 
 
