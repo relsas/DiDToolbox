@@ -17,7 +17,7 @@ Code and Description for a Difference-in-Differences (DiD) Toolbox for Matlab
 addpath(genpath('/path/to/YourToolbox'))
 
 
-**Option B (toolbox)**: Download the .mltbx from the la
+**Option B (toolbox)**: Download the .mltbx from the latest Github release and simply open form inside Matlab to install
 
 
 
