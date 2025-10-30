@@ -8,6 +8,9 @@ Code and Description for a Difference-in-Differences (DiD) Toolbox for Matlab
 
 Toolbox to conduct econometric DiD analyses of causal relationships in the context of staggered treatments.
 
+\*\* Requirements
+Matlab from Version 2021+
+Statistics and Machine Learning Toolbox
 
 \## Install
 
@@ -16,16 +19,10 @@ Toolbox to conduct econometric DiD analyses of causal relationships in the conte
 ```matlab
 addpath(genpath('/path/to/YourToolbox'))
 
-
-
 \*\*Option B (toolbox): Download the .mltbx from the latest GitHub Release and double-click in MATLAB.
 
-\##
 
-\*\* Requirements
-Matlab from Version 2021+
 
-Statistics and Machine Learning Toolbox
 
 
 
