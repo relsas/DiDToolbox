@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# MATLAB autosaves/backups
+*.asv
+*.m~
+*.autosave
+*.mlx.autosave
+
+# Compiled/cache
+*.mex*
+*.p
+slprj/
+codegen/
+
+# Packaged toolbox artifacts (keep .prj, ignore built .mltbx)
+*.mltbx
+
+# Large or generated stuff
+*.log
