@@ -15,7 +15,6 @@ slprj/
 codegen/
 
 # Packaged toolbox artifacts (keep .prj, ignore built .mltbx)
-*.mltbx
 
 # Large or generated stuff
 *.log
