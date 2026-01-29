@@ -31,7 +31,7 @@ classdef IW < did.estimators.Estimator
 
             % ---- Aliases (compat) ----
             if isfield(S,'multiplier')  && ~isfield(S,'Multiplier'), S.Multiplier = S.multiplier;  end
-            if isfield(S,'Detail')      && ~isfield(S,'Print'),      S.Print      = S.Detail;      end
+            if isfield(S,'Detail')      && ~isfield(S,'Display'),      S.Display      = S.Detail;      end
 
             % ---- Defaults / sanitization ----
             if ~isfield(S,'SEMethod'),   S.SEMethod   = "multiplier"; end
@@ -42,7 +42,7 @@ classdef IW < did.estimators.Estimator
             if ~isfield(S,'Seed') || ~isfinite(S.Seed) || S.Seed<0 || S.Seed>=2^32 || isnan(S.Seed)
                 S.Seed = randi([1,1e7],1,1); else, S.Seed = double(S.Seed); end
             if ~isfield(S,'Studentize'), S.Studentize = true; end
-            if ~isfield(S,'Print'),      S.Print      = true; end
+            if ~isfield(S,'Display'),      S.Display      = true; end
 
             obj.opts = S;
         end

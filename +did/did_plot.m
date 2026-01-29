@@ -6,18 +6,19 @@ function did_plot(res_in, what, varargin)
 %
 % Supported 'what': "event" | "cohort" | "calendar" | "support"
 % (Note: "overall" intentionally does nothing per spec.)
-% 
+%
 % ------------------------------------------------------------------------
 % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
-% Last change: 10/03/2025  
+% Last change: 10/03/2025
 % ------------------------------------------------------------------------
 ip = inputParser;
 addRequired(ip,'res_in');
-addRequired(ip,'what',@(s) any(strcmpi(string(s),["event","cohort","calendar","support"])));
+addRequired(ip,'what',@(s) any(strcmpi(string(s),["event","cohort","calendar","support","trends"])));
 addParameter(ip,'Alpha',0.95,@(x) isnumeric(x) && x>0 && x<1);
 addParameter(ip,'Legend',true,@islogical);
 addParameter(ip,'ZeroLine',true,@islogical);
 addParameter(ip,'Labels',{},@(x) iscellstr(x) || isstring(x));
+addParameter(ip,'XAxis',"calendar",@(x) any(strcmpi(string(x),["calendar","event"])));
 parse(ip,res_in,what,varargin{:});
 P = ip.Results;
 
@@ -30,7 +31,11 @@ S = cell(1,K);
 L = strings(1,K);
 userLabels = string(P.Labels);
 for k = 1:K
-    S{k} = did.did_standardize(res_in{k}, 'Alpha', P.Alpha);
+    if isa(res_in{k}, 'did.Dataset')
+        S{k} = res_in{k}; % Pass thorugh datasets for "trends" mode
+    else
+        S{k} = did.did_standardize(res_in{k}, 'Alpha', P.Alpha);
+    end
     if ~isempty(userLabels) && numel(userLabels) >= k && strlength(userLabels(k))>0
         L(k) = userLabels(k);
     elseif isfield(res_in{k},'Method') && ~isempty(res_in{k}.Method)
@@ -111,7 +116,7 @@ switch lower(string(P.what))
             end
         end
 
-        grid(ax,'on'); 
+        grid(ax,'on');
         if hasCH && ~hasOther
             xlabel(ax,'Time t'); ylabel(ax,'DID^+(t) / DID^-(t)');
         else
@@ -152,15 +157,100 @@ switch lower(string(P.what))
             if ~isfield(S{k},'support') || isempty(S{k}.support), continue; end
             U = S{k}.support;
             if ismember('nObs', U.Properties.VariableNames)
-                bar(ax, U.k, U.nObs, 'FaceAlpha',0.25, 'EdgeColor','none','DisplayName',L(k)); 
+                bar(ax, U.k, U.nObs, 'FaceAlpha',0.25, 'EdgeColor','none','DisplayName',L(k));
             elseif ismember('nCohorts', U.Properties.VariableNames)
-                bar(ax, U.k, U.nCohorts, 'FaceAlpha',0.25, 'EdgeColor','none','DisplayName',L(k)); 
+                bar(ax, U.k, U.nCohorts, 'FaceAlpha',0.25, 'EdgeColor','none','DisplayName',L(k));
             else
                 plot(ax, U.k, U{:,2},'-o','LineWidth',1.6,'DisplayName',L(k));
             end
         end
         grid(ax,'on'); xlabel(ax,'Event time e'); ylabel(ax,'Support');
         if P.ZeroLine, yline(ax,0,'k:'); xline(ax,0,'k:'); end
+        if P.Legend, legend(ax,'Location','best'); end
+
+    case "trends"
+        % New case: Plot raw average trends by cohort (including never-treated)
+        % Expects res_in to contain did.Dataset objects (not standardized structs)
+        hasAny = any(cellfun(@(s) isa(s,'did.Dataset'), res_in));
+
+        if ~hasAny
+            % Check if it's the standardized struct but maybe we can't plot trends from summary alone?
+            % Actually, trends require raw data.
+            fprintf('Error: "trends" plot requires passing a did.Dataset object.\n');
+            return;
+        end
+
+        f = figure('Color','w','Name', "Raw Trends by Cohort"); %#ok<NASGU>
+        ax = gca; hold(ax,'on'); set_light_axes_(ax);
+
+        % Color palette (MATLAB default approx)
+        colors = lines(7);
+
+        for k=1:K
+            ds = res_in{k};
+            if ~isa(ds,'did.Dataset'), continue; end
+
+            % Materialize cohort info if not present
+            g = ds.get("g");
+            if strcmpi(P.XAxis, "event")
+                t = ds.get("eventTime");
+            else
+                t = ds.get("t_int");
+            end
+            y = ds.T.(ds.yVar);
+
+            % Aggregate mean(y) by (t, g)
+            % Create temporary table for aggregation
+            tmp = table(t, g, y, 'VariableNames', ["t", "g", "y"]);
+            stats = groupsummary(tmp, ["t", "g"], "mean", "y");
+
+            gVals = unique(stats.g);
+
+            for i = 1:numel(gVals)
+                g_val = gVals(i);
+                sub = stats(stats.g == g_val, :);
+
+                % Style
+                if g_val == 0
+                    % Never treated: Grey, dashed
+                    lStyle = '--';
+                    mStyle = 'o';
+                    col    = [0.5 0.5 0.5];
+                    name   = "Never Treated";
+                    lw     = 2;
+                else
+                    % Treated: Solid circles
+                    lStyle = '-';
+                    mStyle = 'o';
+                    col    = colors(mod(i-1,7)+1, :);
+                    name   = sprintf("Cohort g=%g", g_val);
+                    lw     = 1.5;
+                end
+
+                plot(ax, sub.t, sub.mean_y, ...
+                    'LineStyle', lStyle, 'Marker', mStyle, ...
+                    'Color', col, 'LineWidth', lw, ...
+                    'DisplayName', name);
+
+                % Add vertical line at treatment start (if treated)
+                if strcmpi(P.XAxis, "event")
+                    if i==1, xline(ax, -0.5, ':', 'Color','k', 'LineWidth', 1, 'HandleVisibility','off'); end
+                else
+                    if g_val > 0
+                        xline(ax, g_val - 0.5, ':', 'Color', col, 'LineWidth', 1, 'HandleVisibility','off');
+                    end
+                end
+            end
+        end
+
+        grid(ax,'on');
+        if strcmpi(P.XAxis, "event")
+            xlabel(ax,'Event Time e');
+        else
+            xlabel(ax,'Calendar Time t');
+        end
+        ylabel(ax,'Average Outcome Y');
+        title(ax, ["Parallel Trends Inspection (Raw Means)", "X-Axis: " + P.XAxis]);
         if P.Legend, legend(ax,'Location','best'); end
 end
 end

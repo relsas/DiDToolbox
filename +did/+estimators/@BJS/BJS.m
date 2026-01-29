@@ -1,7 +1,7 @@
 classdef BJS < did.estimators.Estimator
     % did.estimators.BJS  Wrapper for Borusyak–Jaravel–Spiess (2024) imputation.
-    % 
-    % 
+    %
+    %
     % ------------------------------------------------------------------------
     % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
     % Last change: 09/30/2025
@@ -15,6 +15,7 @@ classdef BJS < did.estimators.Estimator
         Seed       double  = randi([1,1e7],1,1)
         Display    logical = true
         useParallel (1,1) double = 1
+        Weights    (:,1) double = []
     end
 
     methods
@@ -24,7 +25,7 @@ classdef BJS < did.estimators.Estimator
                 if mod(numel(varargin),2)~=0
                     error('did:BJS:NameValue','Constructor expects name–value pairs.');
                 end
-                
+
                 for k = 1:2:numel(varargin)
                     name  = lower(string(varargin{k}));
                     value = varargin{k+1};
@@ -36,35 +37,82 @@ classdef BJS < did.estimators.Estimator
                         case 'seed',       obj.Seed       = double(value);
                         case 'display',    obj.Display    = logical(value);
                         case 'useparallel', obj.useParallel = double(value);
+                        case 'weights',    obj.Weights    = double(value);
                         otherwise
                             warning('did:BJS:UnknownOption','Ignoring unknown option "%s".', name);
                     end
                 end
             end
-            
+
         end
 
         function res = fit(obj, ds)
-    [T, idVar, timeVar, yVar, dVar] = obj.unpackDs(ds);
+            [T, idVar, timeVar, yVar, dVar] = obj.unpackDs(ds);
 
-    % Run your function (unchanged behavior)
-    res = did.estimators.bjs_imputation(T, ...
-        idVar=idVar, timeVar=timeVar, yVar=yVar, dVar=dVar, ...
-        Covariates=obj.Covariates, Horizons=obj.Horizons, ...
-        SEMethod=obj.SEMethod, BootReps=obj.BootReps, Seed=obj.Seed, ...
-        Display=obj.Display, useParallel=obj.useParallel);
+            % Ensure pool exists and matches size if requested
+            workers = obj.useParallel;
+            if workers > 0
+                pool = gcp('nocreate');
+                if isempty(pool)
+                    % No pool: start one
+                    try
+                        if workers > 1
+                            parpool(workers);
+                        else
+                            parpool(); % default size
+                        end
+                    catch ME
+                        warning('did:BJS:ParpoolFail', 'Failed to start parallel pool: %s', ME.message);
+                    end
+                elseif workers > 1 && pool.NumWorkers ~= workers
+                    % Pool exists but wrong size: Restart used requested explicitly
+                    try
+                        delete(pool);
+                        parpool(workers);
+                    catch ME
+                        warning('did:BJS:ParpoolResizeFail', 'Failed to resize parallel pool to %d: %s', workers, ME.message);
+                        % Try to restore default if specific failed?
+                        if isempty(gcp('nocreate')), parpool(); end
+                    end
+                end
+            end
 
-    % --- Normalize for did.utils.makeSummaryTable ---
-    [coef, vcov, mainIdx] = did.estimators.BJS.packCoefForSummary(res);
+            % Run your function (unchanged behavior)
+            res = did.estimators.bjs_imputation(T, ...
+                idVar=idVar, timeVar=timeVar, yVar=yVar, dVar=dVar, ...
+                Covariates=obj.Covariates, Horizons=obj.Horizons, ...
+                SEMethod=obj.SEMethod, BootReps=obj.BootReps, Seed=obj.Seed, ...
+                Display=obj.Display, useParallel=obj.useParallel, ...
+                Weights=obj.Weights);
 
-    res.Method = "BJS";
-    res.coef   = coef;          % must have variables: Name, Estimate
-    res.vcov   = vcov;          % diagonal from BJS SEs so SEs show up
-    res.df     = Inf;           % normal approx for p-values
+            % --- Normalize for did.utils.makeSummaryTable ---
+            [coef, vcov, mainIdx] = did.estimators.BJS.packCoefForSummary(res);
 
-    % Minimal design info so keepMainOnly etc. works
-    res.Diagnostics.design = struct('names', coef.Name, 'idxD', mainIdx);
-end
+            res.Method = "BJS";
+            res.coef   = coef;          % must have variables: Name, Estimate
+            res.vcov   = vcov;          % diagonal from BJS SEs so SEs show up
+            res.df     = Inf;           % normal approx for p-values
+
+            % Minimal design info so keepMainOnly etc. works
+            res.Diagnostics.design = struct('names', coef.Name, 'idxD', mainIdx);
+
+            % --- Create standard output table ---
+            try
+                res.summaryTable = did.utils.makeSummaryTable(res);
+            catch ME
+                % Fallback (if utility fails)
+                res.summaryTable = coef;
+                res.summaryTable.SE = sqrt(diag(vcov));
+                warning('did:BJS:NoSummaryTable', 'Could not create full summary table. Using minimal fallback: %s', ME.message);
+            end
+
+            if obj.Display
+                fprintf('\n[BJS] Estimates (SE=%s, Boot=%d)\n', obj.SEMethod, obj.BootReps);
+                if istable(res.summaryTable)
+                    disp(res.summaryTable);
+                end
+            end
+        end
 
 
     end
@@ -170,62 +218,68 @@ end
         end
     end
 
-   methods (Static)
-    function [coef, vcov, mainIdx] = packCoefForSummary(res)
-        % Build rows for makeSummaryTable: Name, Estimate
-        names = strings(0,1);
-        ests  = zeros(0,1);
-        ses   = nan(0,1);
+    methods (Static)
+        function [coef, vcov, mainIdx] = packCoefForSummary(res)
+            % Build rows for makeSummaryTable: Name, Estimate
+            names = strings(0,1);
+            ests  = zeros(0,1);
+            ses   = nan(0,1);
 
-        % ---- Overall ATT ----
-        mainIdx = [];  % we will set to the overall row if present
-        if isfield(res,'ATT_overall') && ~isempty(res.ATT_overall)
-            r = res.ATT_overall;
-            names(end+1,1) = "ATT_overall";
-            ests (end+1,1) = double(r.ATT);
-            ses  (end+1,1) = double(r.SE);
-            mainIdx = 1;
-        end
+            % ---- Overall ATT ----
+            mainIdx = [];  % we will set to the overall row if present
+            if isfield(res,'ATT_overall') && ~isempty(res.ATT_overall)
+                r = res.ATT_overall;
+                names(end+1,1) = "ATT_overall";
+                ests (end+1,1) = double(r.ATT);
 
-        % ---- ATT by horizon ----
-        if isfield(res,'ATT_by_horizon') && ~isempty(res.ATT_by_horizon)
-            A = res.ATT_by_horizon;
-            for i = 1:height(A)
-                k    = double(A.k(i));
-                names(end+1,1) = "ATT_k=" + string(k);
-                ests (end+1,1) = double(A.ATT_k(i));
-                ses  (end+1,1) = double(A.SE(i));
+                % Robust SE extraction
+                if ismember('SE', r.Properties.VariableNames)
+                    ses(end+1,1) = double(r.SE);
+                else
+                    ses(end+1,1) = NaN;
+                end
+                mainIdx = 1;
             end
-            % If no explicit main yet, prefer k==0 as main effect
-            if isempty(mainIdx)
-                idx0 = find(double(A.k)==0, 1);
-                if ~isempty(idx0)
-                    mainIdx = 1 + idx0;  % 1 for overall row offset
+
+            % ---- ATT by horizon ----
+            if isfield(res,'ATT_by_horizon') && ~isempty(res.ATT_by_horizon)
+                A = res.ATT_by_horizon;
+                for i = 1:height(A)
+                    k    = double(A.k(i));
+                    names(end+1,1) = "ATT_k=" + string(k);
+                    ests (end+1,1) = double(A.ATT_k(i));
+                    ses  (end+1,1) = double(A.SE(i));
+                end
+                % If no explicit main yet, prefer k==0 as main effect
+                if isempty(mainIdx)
+                    idx0 = find(double(A.k)==0, 1);
+                    if ~isempty(idx0)
+                        mainIdx = 1 + idx0;  % 1 for overall row offset
+                    end
                 end
             end
-        end
 
-        % ---- Optional: cohort-balanced ATT(k) ----
-        if isfield(res,'ATT_balanced') && ~isempty(res.ATT_balanced)
-            B = res.ATT_balanced;
-            for i = 1:height(B)
-                k    = double(B.k(i));
-                names(end+1,1) = "ATT_bal_k=" + string(k);
-                ests (end+1,1) = double(B.ATT_k_bal(i));
-                ses  (end+1,1) = double(B.SE(i));
+            % ---- Optional: cohort-balanced ATT(k) ----
+            if isfield(res,'ATT_balanced') && ~isempty(res.ATT_balanced)
+                B = res.ATT_balanced;
+                for i = 1:height(B)
+                    k    = double(B.k(i));
+                    names(end+1,1) = "ATT_bal_k=" + string(k);
+                    ests (end+1,1) = double(B.ATT_k_bal(i));
+                    ses  (end+1,1) = double(B.SE(i));
+                end
             end
-        end
 
-        % Fallback main index
-        if isempty(mainIdx)
-            mainIdx = 1;
-        end
+            % Fallback main index
+            if isempty(mainIdx)
+                mainIdx = 1;
+            end
 
-        % Output table and diagonal vcov (so makeSummaryTable can compute SE/t/p)
-        coef = table(names, ests, 'VariableNames', ["Name","Estimate"]);
-        vcov = diag(ses.^2);
+            % Output table and diagonal vcov (so makeSummaryTable can compute SE/t/p)
+            coef = table(names, ests, 'VariableNames', ["Name","Estimate"]);
+            vcov = diag(ses.^2);
+        end
     end
-end
 
 
 end

@@ -20,6 +20,11 @@ if isfield(opts,'smallSample') && ~isempty(opts.smallSample)
     smallSample = logical(opts.smallSample);
 end
 
+display = true;
+if isfield(opts,'Display') && ~isempty(opts.Display)
+    display = logical(opts.Display);
+end
+
 % Wild bootstrap options (only if you actually have a WildBootstrap engine)
 cluster = string.empty(1,0);
 if isfield(opts,'cluster') && ~isempty(opts.cluster)
@@ -48,7 +53,7 @@ end
 
 switch spec
     case "clustered"
-        v = did.vcov.Clustered(clusters=clusters, smallSample=smallSample);
+        v = did.vcov.Clustered(clusters=clusters, smallSample=smallSample, Display=display);
 
     case "wild"
         % Only keep this branch if did.vcov.WildBootstrap exists in your repo.

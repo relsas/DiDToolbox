@@ -3,7 +3,7 @@ classdef baconDecomp
     % 
     % ------------------------------------------------------------------------
     % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
-    % Last change: 09/30/2025
+    % Last change: 11/07/2025
     % ------------------------------------------------------------------------
 
     properties
@@ -55,6 +55,7 @@ classdef baconDecomp
 
         function [results, results_aggregate] = decompose(obj)
             % Initialize containers
+           
             n_comparisons = nchoosek(length(obj.treatmentTimes), 2) * 2 + length(obj.treatmentTimes);
             type     = cell(n_comparisons, 1);
             group1   = zeros(n_comparisons, 1);

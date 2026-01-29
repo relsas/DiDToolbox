@@ -2,28 +2,44 @@ function T = genDIDdata(numPeriods,numIds,percTreated, opts)
 % DID.GENDIDDATA  Simulate panel data for DiD with staggered / on-off treatment,
 %                 optional covariates, pre-trend drift, and cohort controls.
 %
-% Usage (legacy signature + name–values):
-%   T = did.genDIDdata(numPeriods, numIds, percTreated, ...
-%       ATT=2, startPeriod=5, endPeriod=8, ...
-%       treatType="constant"|"constantTime"|"timeIncrease"|"onOff", dynEffect=0.2, ...
-%       meanError=0.5, errorStd=1.5, Seed=NaN, ...
-%       % Covariates
-%       xNum=0, xUnitStd=1, xTimeStd=1, xShockStd=1, betaX=0, ...
-%       % Pre-trend
-%       preTrendType="none"|"unitLinear"|"preOnly", preTrendSd=0, preCenterTime=[], ...
-%       % Cohort control (staggered modes only)
-%       cohortTimes=[], numCohorts=NaN, cohortProbs=[], cohortSize=[], treatedNum=NaN, ...
-%       % Cohort-level ATT options (constantTime only)
-%       CohortIncrease=0, CohortLevels=[])
+% Usage:
+%   T = did.genDIDdata(numPeriods, numIds, percTreated, Name, Value, ...)
 %
-% Output columns:
-%   id, time, y, D, g (first-treat time; 0=never), eventTime,
-%   i_FE, t_FE, everTreated, ATT, x1..xK (if xNum>0)
-% 
-% 
+% Arguments:
+%   numPeriods  (int)    Number of time periods (default 11)
+%   numIds      (int)    Number of cross-sectional units (default 100)
+%   percTreated (double) Fraction of units to be ever-treated (0..1)
+%
+% Name-Value Options:
+%   -- Treatment Process --
+%   ATT           (double) True Average Treatment Effect on Treated (default 2)
+%   startPeriod   (int)    Period when treatment starts (default 5)
+%   endPeriod     (int)    Period when treatment ends (for "onOff") (default 8)
+%   treatType     (string) "constant" (default), "constantTime", "timeIncrease", "onOff"
+%   dynEffect     (double) Slope of dynamic effect in "timeIncrease" (default 0.2)
+%   cohortTimes   (vector) Specific start times for cohorts (e.g. [5, 10])
+%
+%   -- Errors / Fixed Effects --
+%   meanError     (double) Mean of error term (default 0.5)
+%   errorStd      (double) Std dev of error term (default 1.5)
+%   Seed          (int)    Random seed (default random)
+%
+%   -- Pre-Trends --
+%   preTrendType  (string) "none" (default), "unitLinear", "preOnly", "divergentControls"
+%   preTrendSd    (double) Std dev of random slopes (default 0)
+%   preTrendMeanTreated (double) Mean slope added to treated units (default 0)
+%   preTrendMeanControl (double) Mean slope added to standard/divergent controls (default 0)
+%   preTrendDivergentShare (double) Fraction of controls that are divergent (0..1, default 0.5)
+%                                   Used only with "divergentControls".
+%
+%   -- Covariates & Selection --
+%   xNum, xUnitStd, xTimeStd... (See code for details)
+%   SelectionBias (double) Coeff of X on treatment probability (default 0)
+%   TrendEffectX  (double) Coeff of X on linear time trend (default 0)
+%
 % ------------------------------------------------------------------------
 % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
-% Last change: 09/30/2025
+% Last change: 01/26/2026 (Added divergentControls)
 % ------------------------------------------------------------------------
 
 arguments
@@ -52,9 +68,14 @@ arguments
     opts.betaX double = 0
 
     % Pre-trend drift
-    opts.preTrendType (1,1) string {mustBeMember(opts.preTrendType,["none","unitLinear","preOnly"])} = "none"
+    opts.preTrendType (1,1) string {mustBeMember(opts.preTrendType,["none","unitLinear","preOnly","divergentControls"])} = "none"
     opts.preTrendSd (1,1) double {mustBeNonnegative} = 0
+    opts.preTrendMeanTreated (1,1) double = 0
+    opts.preTrendMeanControl (1,1) double = 0
     opts.preCenterTime double = []
+
+    % Control share for divergentControls mode (0..1 fraction of controls that are divergent/bad)
+    opts.preTrendDivergentShare (1,1) double {mustBeInRange(opts.preTrendDivergentShare,0,1)} = 0.5
 
     % Cohort controls (staggered only)
     opts.cohortTimes double = []   % explicit adoption times to use
@@ -66,6 +87,10 @@ arguments
     % Cohort-level ATT controls (for constantTime)
     opts.CohortIncrease (1,1) double = 0.5
     opts.CohortLevels double = []
+
+    % CEM / Selection Bias extensions
+    opts.SelectionBias (1,1) double = 0   % Coefficient of X1 on Treatment Probability
+    opts.TrendEffectX  (1,1) double = 0   % Coefficient of X1 on Linear Time Trend
 end
 
 % RNG
@@ -87,6 +112,50 @@ Tm = (1:numPeriods)';
 i_FE = randn(numIds,1) * opts.errorStd;
 t_FE = opts.meanError/2 + randn(numPeriods,1) * (opts.errorStd/2);
 
+% Covariates X (xNum of them)
+% MOVED UP to allow Selection Bias based on X
+xK = opts.xNum;
+X  = [];
+betaX = [];
+if xK > 0
+    if isscalar(opts.betaX)
+        betaX = repmat(opts.betaX, 1, xK);
+    else
+        betaX = opts.betaX(:)'; if numel(betaX) ~= xK, error('did:genDIDdata:betaXlen','betaX must be scalar or length xNum.'); end
+    end
+    X = zeros(N, xK);
+    % We need unit-level X for selection.
+    % The legacy code generated X as (unit + time + shock).
+    % For selection, we likely care about the Unit FE component of X.
+    % We'll generate the components here but construct the full panel X later or now?
+    % X is N x xK (Long).
+    % Let's generate Unit-level X first.
+
+    % Store unit-level components for selection
+    u_i_mat = zeros(numIds, xK);
+
+    for k = 1:xK
+        u_i  = randn(numIds,1)    * opts.xUnitStd;   % unit FE component
+        u_i_mat(:,k) = u_i;
+
+        v_t  = randn(numPeriods,1)* opts.xTimeStd;   % time FE component
+        e_it = randn(N,1)         * opts.xShockStd;  % idio shock
+
+        X(:,k) = repelem(u_i,numPeriods) + repmat(v_t,numIds,1) + e_it;
+    end
+else
+    % If SelectionBias is requested but xNum=0, forcing xNum=1 would break "output columns" expectation?
+    % Better to throw error if SelectionBias != 0 and xNum == 0, OR create a latent X that isn't output?
+    % The user plan said "Add argument... if SelectionBias is active...".
+    if opts.SelectionBias ~= 0
+        warning('did:genDIDdata:BiasWithoutX', 'SelectionBias requested but xNum=0. Bias will be based on a latent unobserved variable.');
+        % Generate latent X for selection
+        u_i_mat = randn(numIds, 1);
+    else
+        u_i_mat = [];
+    end
+end
+
 % Treatment assignment at unit level (everTreated)
 if ~isnan(opts.treatedNum)
     % exact count requested by user
@@ -95,9 +164,32 @@ if ~isnan(opts.treatedNum)
         error('did:genDIDdata:treatedNum','treatedNum must be in [0, %d].', numIds);
     end
     everTreated = false(numIds,1);
-    everTreated(randperm(numIds, nTreated)) = true;
+
+    if opts.SelectionBias ~= 0 && ~isempty(u_i_mat)
+        % Prob score p ~ sigmoid(bias * X)
+        z = -1 + opts.SelectionBias * u_i_mat(:,1); % Use first X
+        % Pick units with highest propensity? Or weighted sampling?
+        % Standard practice for "Exact Number" with bias:
+        % exact treated are those with highest latent index? Or weighted sample.
+        % Let's do weighted sample without replacement.
+        prob = 1 ./ (1 + exp(-z));
+        everTreated(randsample(numIds, nTreated, true, prob)) = true;
+    else
+        everTreated(randperm(numIds, nTreated)) = true;
+    end
 else
-    everTreated = rand(numIds,1) < percTreated;   % Binomial draw
+    if opts.SelectionBias ~= 0 && ~isempty(u_i_mat)
+        % Logistic selection
+        % Calibrate intercept? No, user provided percTreated is ignored?
+        % Or we assume the bias modifies the base rate.
+        % z = logit(percTreated) + bias * X
+        base_z = log(percTreated / (1 - percTreated));
+        z = base_z + opts.SelectionBias * u_i_mat(:,1);
+        prob = 1 ./ (1 + exp(-z));
+        everTreated = rand(numIds,1) < prob;
+    else
+        everTreated = rand(numIds,1) < percTreated;   % Binomial draw
+    end
     nTreated = sum(everTreated);
 end
 
@@ -122,15 +214,14 @@ switch opts.treatType
         % otherwise fall back to legacy single-cohort behavior.
 
         % Determine candidate START times (cohorts)
-        cand = [];
-        K = 1;
         userWantsStaggered = (~isempty(opts.cohortTimes)) || (~isnan(opts.numCohorts) && opts.numCohorts>=1) ...
             || ~isempty(opts.cohortSize) || ~isempty(opts.cohortProbs);
 
         if userWantsStaggered
             if ~isempty(opts.cohortTimes)
                 cand = unique(round(opts.cohortTimes(:)'));
-                cand = cand(cand >= opts.startPeriod & cand <= numPeriods);
+                % User overrides startPeriod. Only bound by 1..numPeriods
+                cand = cand(cand >= 1 & cand <= numPeriods);
             elseif ~isnan(opts.numCohorts) && opts.numCohorts >= 1
                 K  = min(numPeriods - opts.startPeriod + 1, round(opts.numCohorts));
                 cand = unique(round(linspace(opts.startPeriod, numPeriods, K)));
@@ -207,14 +298,15 @@ switch opts.treatType
     case {"constant"}
         g_unit = opts.startPeriod * double(everTreated);
         K = 1; cand = opts.startPeriod;
-    
+
 
     case {"constantTime","timeIncrease"}  % staggered starts allowed
         % Determine candidate cohort times
         cand = [];
         if ~isempty(opts.cohortTimes)
             cand = unique(round(opts.cohortTimes(:)'));
-            cand = cand(cand >= opts.startPeriod & cand <= numPeriods);
+            % User overrides startPeriod. Only bound by 1..numPeriods
+            cand = cand(cand >= 1 & cand <= numPeriods);
             if isempty(cand)
                 error('did:genDIDdata:cohortTimes','cohortTimes must contain at least one integer in [startPeriod, numPeriods].');
             end
@@ -227,6 +319,7 @@ switch opts.treatType
             cand = opts.startPeriod:numPeriods;   % default: any period in window
         end
         K = numel(cand);
+
 
         % Allocate treated units to cohorts
         g_unit = zeros(numIds,1);
@@ -330,41 +423,74 @@ end
 
 % Pre-trend drift (unit-specific slope)
 preTerm = zeros(N,1);
-if opts.preTrendType ~= "none" && opts.preTrendSd > 0
+slope_i = zeros(numIds,1); % Initialize latent slope
+
+if opts.preTrendType ~= "none"
+    % Base random slopes
     slope_i = randn(numIds,1) * opts.preTrendSd;
+
+    % Add systematic difference
+    if opts.preTrendMeanTreated ~= 0 || opts.preTrendMeanControl ~= 0
+        if opts.preTrendType == "divergentControls"
+            % Split controls into Good (Parallel) and Bad (Divergent)
+            % Good Controls match Treated Trend
+            % Bad Controls match Control Trend (Divergent)
+            ctrlIdx = find(~everTreated);
+            nC = numel(ctrlIdx);
+
+            % Divergent Share determines Bad Controls
+            nBad  = round(nC * opts.preTrendDivergentShare);
+            nGood = nC - nBad;
+
+            permC = randperm(nC);
+            badC  = ctrlIdx(permC(1:nBad));
+            goodC = ctrlIdx(permC(nBad+1:end));
+
+            slope_i(everTreated) = slope_i(everTreated) + opts.preTrendMeanTreated;
+            slope_i(goodC)       = slope_i(goodC)       + opts.preTrendMeanTreated; % Parallel
+            slope_i(badC)        = slope_i(badC)        + opts.preTrendMeanControl; % Divergent
+        else
+            % Standard: All controls get MeanControl
+            slope_i(everTreated)  = slope_i(everTreated)  + opts.preTrendMeanTreated;
+            slope_i(~everTreated) = slope_i(~everTreated) + opts.preTrendMeanControl;
+        end
+    end
+
     slope   = repelem(slope_i, numPeriods);
     switch opts.preTrendType
         case "unitLinear"
-            t0 = isempty(opts.preCenterTime) * mean(1:numPeriods) + ...
-                ~isempty(opts.preCenterTime) * opts.preCenterTime;
+            if isempty(opts.preCenterTime)
+                t0 = mean(1:numPeriods);
+            else
+                t0 = opts.preCenterTime;
+            end
             preTerm = slope .* (time - t0);
         case "preOnly"
             preTerm = slope .* min(0, time - g);  % only before adoption
+        case "divergentControls"
+            if isempty(opts.preCenterTime)
+                t0 = mean(1:numPeriods);
+            else
+                t0 = opts.preCenterTime;
+            end
+            preTerm = slope .* (time - t0); % Same linear trend shape as unitLinear
     end
 end
 
-% Covariates X (xNum of them)
-xK = opts.xNum;
-X  = [];
-if xK > 0
-    if isscalar(opts.betaX)
-        betaX = repmat(opts.betaX, 1, xK);
-    else
-        betaX = opts.betaX(:)'; if numel(betaX) ~= xK, error('did:genDIDdata:betaXlen','betaX must be scalar or length xNum.'); end
-    end
-    X = zeros(N, xK);
-    for k = 1:xK
-        u_i  = randn(numIds,1)    * opts.xUnitStd;   % unit FE component
-        v_t  = randn(numPeriods,1)* opts.xTimeStd;   % time FE component
-        e_it = randn(N,1)         * opts.xShockStd;  % idio shock
-        X(:,k) = repelem(u_i,numPeriods) + repmat(v_t,numIds,1) + e_it;
-    end
-else
-    betaX = [];
-end
+% (Covariates X generation moved up)
 
 % Outcome components
 y_base  = repelem(i_FE, numPeriods) + repmat(t_FE, numIds, 1) + preTerm;
+
+% Trend Effect from X (confounding trend)
+y_trendX = zeros(N,1);
+if opts.TrendEffectX ~= 0 && ~isempty(X)
+    % Effect of X1 on linear time trend
+    % X is N x K. Use X(:,1).
+    % Time is 1..T
+    % Effect = gamma * X_i * t
+    y_trendX = opts.TrendEffectX * X(:,1) .* time;
+end
 
 % Always make yX N×1
 yX = zeros(N,1);
@@ -373,7 +499,7 @@ if xK > 0
 end
 
 epsilon = opts.meanError + randn(N,1) * opts.errorStd;
-y = y_base + yX + ATT + epsilon;
+y = y_base + yX + y_trendX + ATT + epsilon;
 
 % Event time (never-treated centered at startPeriod)
 eventTime = time - g;
@@ -381,9 +507,10 @@ evNever   = (g==0);
 eventTime(evNever) = time(evNever) - opts.startPeriod;
 
 % Build output table
-varNames = ["id","time","y","D","g","eventTime","i_FE","t_FE","everTreated","ATT"];
+varNames = ["id","time","y","D","g","eventTime","i_FE","t_FE","everTreated","ATT","latent_slope"];
 T = table(id, time, y, D, g, eventTime, ...
     repelem(i_FE,numPeriods), repmat(t_FE,numIds,1), repelem(double(everTreated),numPeriods), ATT, ...
+    repelem(slope_i,numPeriods), ...
     'VariableNames', varNames);
 
 % Append covariates if any

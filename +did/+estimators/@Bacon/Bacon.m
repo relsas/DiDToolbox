@@ -27,8 +27,11 @@ classdef Bacon < did.estimators.Estimator
         function res = fit(obj, ds)
 
             % Ensure a cohort variable g (first-treat time index; 0 = never)
-            [T2, gVar] = obj.ensureGvar(ds.T, ds.idVar, ds.timeVar, ds.dVar);
-
+            [T2, gVar] = did.utils.ensureGvar(ds.T, ds.idVar, ds.timeVar, ds.dVar);
+            nCohort = length(find(unique(T2.(gVar))~=0));
+            if nCohort<=1
+                error("There are too few cohorts to run the Bacon decomposition: nCohort= "+nCohort);
+            end
             % Do Bacon
             out = did.bacon_decomp(T2, ...
                 idvar=ds.idVar, tvar=ds.timeVar, gvar=gVar, yvar=ds.yVar, ...
@@ -50,42 +53,5 @@ classdef Bacon < did.estimators.Estimator
         end
     end
 
-    methods (Access = private)
-
-        function [T2, gVar] = ensureGvar(~, T, idVar, timeVar, dVar)
-            % Build integer time index and first-treat cohort g (0 = never)
-            T2 = T;
-            [~,~,t_idx] = unique(T2.(timeVar), 'stable');
-            T2.t_int = double(t_idx);   % <-- single underscore (exists)
-
-            uniqueTime = unique(T2.(timeVar));
-            D = T2.(dVar)==1;
-            if any(D)
-                % summarize MIN over the variable that actually exists: "t_int"
-                adopt = groupsummary(T2(D,:), idVar, "min", "t_int");
-
-                % Rename min_t_int -> g_int (robust to column order)
-                nv = adopt.Properties.VariableNames;
-                ix = find(strcmpi(nv,'min_t_int'), 1);
-                if ~isempty(ix)
-                    adopt.Properties.VariableNames{ix} = 'g_int';
-                else
-                    adopt.Properties.VariableNames{end} = 'g_int';
-                end
-
-                % Join back and build g_bacon (0 for never-treated)
-                T2 = outerjoin(T2, adopt(:,[idVar,"g_int"]), ...
-                    "Keys", idVar, "MergeKeys", true, "Type","left");
-                T2.g_bacon(~isnan(T2.g_int)) = uniqueTime(T2.g_int(~isnan(T2.g_int)));
-
-                T2.g_int = [];
-            else
-                T2.g_bacon = zeros(height(T2),1);
-            end
-
-            % Cleanup temp column and return gVar name
-            T2.t_int = [];
-            gVar = "g_bacon";
-        end
-    end
+    
 end

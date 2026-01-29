@@ -1,13 +1,13 @@
 function out = ch_estimator(Data, opts)
 %DID.CH_ESTIMATOR  CH.m is DID_M wrapper (joiners/leavers, placebo, cluster bootstrap).
-%  
+%
 % The DID_M estimator targets , the Average Treatment Effect (ATE) across all "switching cells"—groups whose treatment status changes between $t-1$ and $t$. This is calculated as a weighted average of two specific DiD terms:
 %     ◦ $DID_{+,t}$: Compares joiners (treatment $0 \to 1$) to groups remaining untreated.
 %     ◦ $DID_{-,t}$: Compares leavers (treatment $1 \to 0$) to groups remaining treated.
-% $DID_M$ is valid under heterogeneous treatment effects and inherently avoids the source of negative weighting bias by strictly 
-% contrasting switching groups against stable groups. In staggered adoption designs, where treatment is typically irreversible, 
+% $DID_M$ is valid under heterogeneous treatment effects and inherently avoids the source of negative weighting bias by strictly
+% contrasting switching groups against stable groups. In staggered adoption designs, where treatment is typically irreversible,
 % $DID_M$ is a weighted average only of the $DID_{+,t}$ estimators.
-% 
+%
 % out = did.ch_estimator(Data=tbl, GroupVar="id", TimeVar="time", YVar="y", DVar="D", ...
 %                         WeightVar="", B=299, ComputePlacebo=true, Seed=42, ...
 %                         Print=true, Details=false, Covariates=[], CovarSample="D0")
@@ -15,10 +15,10 @@ function out = ch_estimator(Data, opts)
 %  Returns:
 %    out.Summary  table with rows: DID_M, Joiners-only, Leavers-only, (Placebo)
 %    plus: DIDM, SE, DIDM_joiners/leavers (+ SE), ByT, Placebo, Diagnostics.
-% 
+%
 % ------------------------------------------------------------------------
 % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
-% Last change: 10/03/2025  
+% Last change: 10/03/2025
 % ------------------------------------------------------------------------
 arguments
     Data {mustBeA(Data,"table")}
@@ -30,11 +30,15 @@ arguments
     opts.B (1,1) double {mustBeInteger, mustBeNonnegative} = 100
     opts.ComputePlacebo (1,1) logical = true
     opts.Seed (1,1) double = NaN
-    opts.Print (1,1) logical = true
+    opts.Display (1,1) logical = true
     opts.Details (1,1) logical = false
     % NEW: FWL covariates
     opts.Covariates string = string.empty(1,0)
     opts.CovarSample (1,1) string {mustBeMember(opts.CovarSample,["D0","never","all"])} = "D0"
+
+    % NEW: Dynamic Horizons
+    opts.Horizons double = []
+    opts.Placebos double = []
 end
 
 T = Data;
@@ -59,7 +63,7 @@ end
 
 % --- micro table for the core (include X as X__name columns)
 GT = table(T.(opts.idVar), T.(opts.timeVar), double(T.(opts.yVar)), ...
-           double(T.(opts.dVar)), double(w), ...
+    double(T.(opts.dVar)), double(w), ...
     'VariableNames', {'G','T','Y','D','N'});
 for k = 1:numel(Xnames)
     GT.('X__' + Xnames(k)) = double(T.(Xnames(k)));
@@ -71,51 +75,213 @@ GT = sortrows(GT, {'G','T'});
 nClusters = numel(unique(GT.G));
 df = max(10, nClusters-1);
 
-% --- run core
-ob = ch_core_(GT=GT, B=opts.B, ComputePlacebo=opts.ComputePlacebo, Seed=opts.Seed, ...
-              Xnames=Xnames, CovarSample=opts.CovarSample);
-
-% --- assemble
-out = ob;
-out.Estimator = "CH2020";
-out.Call = struct('idVar',opts.idVar, 'timeVar',opts.timeVar, 'yVar',opts.yVar, ...
-                  'dVar',opts.dVar, 'WeightVar',opts.WeightVar, 'B',opts.B, ...
-                  'ComputePlacebo',opts.ComputePlacebo, 'Seed',opts.Seed, ...
-                  'Covariates',{Xnames}, 'CovarSample',opts.CovarSample);
-
-% summary table
-Names = ["DID_M"; "Joiners-only"; "Leavers-only"];
-Est   = [ob.DIDM; ob.DIDM_joiners; ob.DIDM_leavers];
-SEs   = [ob.SE;   ob.SE_joiners;  ob.SE_leavers];
-tval  = Est ./ SEs;
-pval  = 2*tcdf(-abs(tval), df);
-
-if isfield(ob,'OverallCW')
-    Names = [Names; "Overall (cohort-weighted)"];
-    Est   = [Est;   ob.OverallCW];
-    SEs   = [SEs;   ob.SECW];
-    tval  = [tval;  Est(end)/SEs(end)];
-    pval  = [pval;  2*tcdf(-abs(tval(end)), df)];
+% --- assemble horizons
+k_list = [];
+if ~isempty(opts.Horizons)
+    k_list = [k_list, reshape(opts.Horizons,1,[])]; %#ok<AGROW>
+else
+    if isempty(opts.Placebos), k_list = 0; end % Default to instant if nothing specified
 end
 
-if isfield(ob,'Placebo') && ~isempty(ob.Placebo) && isfield(ob.Placebo,'DIDM_pl')
-    Names = [Names; "Placebo DID_M"];
-    Est   = [Est;   ob.Placebo.DIDM_pl];
-    SEs   = [SEs;   ob.Placebo.SE_pl];
-    tval  = [tval;  ob.Placebo.DIDM_pl / ob.Placebo.SE_pl];
-    pval  = [pval;  2*tcdf(-abs(tval(end)), df)];
+if ~isempty(opts.Placebos)
+    if isscalar(opts.Placebos) && opts.Placebos > 0
+        % Interpretation: Count of placebos (leads)
+        % e.g. 2 means k = -1, -2
+        p_vec = -1 : -1 : -opts.Placebos;
+        k_list = [k_list, p_vec]; %#ok<AGROW>
+    elseif ~isscalar(opts.Placebos)
+        % Vector of specific leads (should be negative)
+        k_list = [k_list, reshape(opts.Placebos,1,[])]; %#ok<AGROW>
+    end
 end
+k_list = unique(k_list);
+k_list = sort(k_list);
 
-out.summaryTable = table(Names, Est, SEs, tval, pval, ...
-    'VariableNames', {'Effect','Estimate','SE','t','p'});
+% If no dynamic options, run standard single pass
+if isequal(k_list, 0)
+    % Standard run (existing logic)
+    ob = ch_core_(GT=GT, B=opts.B, ComputePlacebo=opts.ComputePlacebo, Seed=opts.Seed, ...
+        Xnames=Xnames, CovarSample=opts.CovarSample);
+
+    % --- assemble
+    out = ob;
+    out.Estimator = "CH2020";
+    out.Call = struct('idVar',opts.idVar, 'timeVar',opts.timeVar, 'yVar',opts.yVar, ...
+        'dVar',opts.dVar, 'WeightVar',opts.WeightVar, 'B',opts.B, ...
+        'ComputePlacebo',opts.ComputePlacebo, 'Seed',opts.Seed, ...
+        'Covariates',{Xnames}, 'CovarSample',opts.CovarSample);
+
+    % summary table
+    Names = ["DID_M"; "Joiners-only"; "Leavers-only"];
+    Est   = [ob.DIDM; ob.DIDM_joiners; ob.DIDM_leavers];
+    SEs   = [ob.SE;   ob.SE_joiners;  ob.SE_leavers];
+    tval  = Est ./ SEs;
+    pval  = 2*tcdf(-abs(tval), df);
+
+    if isfield(ob,'OverallCW')
+        Names = [Names; "Overall (cohort-weighted)"];
+        Est   = [Est;   ob.OverallCW];
+        SEs   = [SEs;   ob.SECW];
+        tval  = [tval;  Est(end)/SEs(end)];
+        pval  = [pval;  2*tcdf(-abs(tval(end)), df)];
+    end
+
+    if isfield(ob,'Placebo') && ~isempty(ob.Placebo) && isfield(ob.Placebo,'DIDM_pl')
+        Names = [Names; "Placebo DID_M"];
+        Est   = [Est;   ob.Placebo.DIDM_pl];
+        SEs   = [SEs;   ob.Placebo.SE_pl];
+        tval  = [tval;  ob.Placebo.DIDM_pl / ob.Placebo.SE_pl];
+        pval  = [pval;  2*tcdf(-abs(tval(end)), df)];
+    end
+
+    out.summaryTable = table(Names, Est, SEs, tval, pval, ...
+        'VariableNames', {'Effect','Estimate','SE','t','p'});
+
+    % For EventStudy compatibility with single run:
+    out.EventStudy = table(0, ob.DIDM, ob.SE, ob.DIDM/ob.SE, 2*tcdf(-abs(ob.DIDM/ob.SE),df), ...
+        'VariableNames', {'EventTime','Estimate','SE','tStat','pValue'});
+    if isfield(ob,'Placebo') && ~isempty(ob.Placebo) && isfield(ob.Placebo,'DIDM_pl')
+        % Add placebo as k=-1
+        row = table(-1, ob.Placebo.DIDM_pl, ob.Placebo.SE_pl, ...
+            ob.Placebo.DIDM_pl/ob.Placebo.SE_pl, ...
+            2*tcdf(-abs(ob.Placebo.DIDM_pl/ob.Placebo.SE_pl),df), ...
+            'VariableNames', {'EventTime','Estimate','SE','tStat','pValue'});
+        out.EventStudy = [out.EventStudy; row];
+        out.EventStudy = sortrows(out.EventStudy,'EventTime');
+    end
+
+else
+    % Loop over k
+    es_rows = [];
+
+    % Pre-sort for safe lagging
+    GT = sortrows(GT, {'G','T'});
+
+    % Store base D
+    D_base = GT.D;
+
+    if opts.Display, fprintf('\nEstimating DID_M dynamic effects (K=%s)...\n', mat2str(k_list)); end
+
+    % Unique Groups
+    uG = unique(GT.G);
+    % Map GT.G to uG indices for speed in loop
+    [~, locG] = ismember(GT.G, uG);
+
+    for ii = 1:numel(k_list)
+        k = k_list(ii);
+
+        % Shift D
+        % k > 0 (Lag): Effect of switching k periods ago.
+        % This implies we relate Y(t) to D(t-k).
+        % So we replace D with Lag(D, k).
+
+        % k < 0 (Lead/Placebo): Effect of future switch D(t+|k|) on Y(t).
+        % So we replace D with Lead(D, |k|) => Lag(D, k) (negative lag is lead).
+
+        if k ~= 0
+            tempD = D_base;
+            tempD(:) = NaN;
+
+            % Optimized Lag Loop
+            for gi = 1:numel(uG)
+                idx = (locG == gi);
+                d_g = D_base(idx);
+                n_g = numel(d_g);
+
+                if k > 0
+                    % Lag k: [NaN(k); d(1:end-k)]
+                    if n_g > k
+                        d_new = [NaN(k,1); d_g(1:end-k)];
+                    else
+                        d_new = NaN(size(d_g));
+                    end
+                elseif k < 0
+                    % Lead |k|: [d(|k|+1:end); NaN(|k|)]
+                    lk = abs(k);
+                    if n_g > lk
+                        d_new = [d_g(lk+1:end); NaN(lk,1)];
+                    else
+                        d_new = NaN(size(d_g));
+                    end
+                end
+                tempD(idx) = d_new;
+            end
+            GT.D = tempD;
+        else
+            GT.D = D_base;
+        end
+
+        % Drop rows where D is NaN (cannot classify switch status)
+        mask_valid = ~isnan(GT.D);
+        if mean(mask_valid)<1
+            GT_sub = GT(mask_valid,:);
+        else
+            GT_sub = GT;
+        end
+
+        % Run Core
+        % Turn off placebo inside core (we handle it via k loop)
+        ob_k = ch_core_(GT=GT_sub, B=opts.B, ComputePlacebo=false, Seed=opts.Seed, ...
+            Xnames=Xnames, CovarSample=opts.CovarSample);
+
+        % Collect
+        est = ob_k.DIDM;
+        se  = ob_k.SE;
+        if isnan(se), se=inf; end % Robustness
+        t   = est/se;
+        p   = 2*tcdf(-abs(t), df);
+        if opts.Display, fprintf('  k=%2d: Est=%8.4f (SE=%8.4f)\n', k, est, se); end
+
+        es_rows = [es_rows; [k, est, se, t, p, height(GT_sub)]]; %#ok<AGROW>
+    end
+
+    % Assemble Output
+    out = struct();
+    out.EventStudy = array2table(es_rows, ...
+        'VariableNames', {'EventTime','Estimate','SE','tStat','pValue','N_Cells'});
+
+    % Use first available Horizon/Placebo for top-level summary
+    % (Matches Stata behavior of reporting something in e(b))
+    idx0 = find(out.EventStudy.EventTime == 0);
+    if isempty(idx0), idx0 = 1; end
+
+    out.DIDM = out.EventStudy.Estimate(idx0);
+    out.SE   = out.EventStudy.SE(idx0);
+
+    % Create a specialized summary table for dynamic
+    out.summaryTable = out.EventStudy;
+    out.summaryTable.Properties.RowNames = string(out.EventStudy.EventTime);
+    out.summaryTable.Name = "DIDM_k=" + string(out.EventStudy.EventTime);
+
+    if opts.Display
+        fprintf('\n=== DID_M summary (table) ===\n');
+        disp(out.summaryTable);
+
+        if isfield(out, 'ATT_by_Cohort')
+            fprintf('\n=== DID_M by Cohort (table) ===\n');
+            disp(out.ATT_by_Cohort);
+        end
+    end
+
+    out.DIDM_joiners = NaN; out.DIDM_leavers = NaN;
+
+    out.Estimator = "CH2020";
+    out.Call = struct('idVar',opts.idVar, 'timeVar',opts.timeVar, 'yVar',opts.yVar, ...
+        'dVar',opts.dVar, 'WeightVar',opts.WeightVar, 'B',opts.B, ...
+        'ComputePlacebo',opts.ComputePlacebo, 'Seed',opts.Seed, ...
+        'Covariates',{Xnames}, 'CovarSample',opts.CovarSample, ...
+        'Horizons',opts.Horizons, 'Placebos',opts.Placebos);
+end
 
 % pretty print
-if opts.Print
+if opts.Display
     fprintf('\n=== DID_M summary (table) ===\n');
     disp(out.summaryTable);
 
-    fprintf('\n=== DID_M by Cohort (table) ===\n');
-    disp(out.ATT_by_Cohort);
+    if isfield(out, 'ATT_by_Cohort')
+        fprintf('\n=== DID_M by Cohort (table) ===\n');
+        disp(out.ATT_by_Cohort);
+    end
 
 end
 end
@@ -191,7 +357,7 @@ GT.Dlag2 = NaN(height(GT),1);
 
 uG = unique(GT.G);
 for gi = 1:numel(uG)
-    idx = find(GT.G==uG(gi));              % rows for this group, already sorted by T
+    idx = find(ismember(GT.G, uG(gi)));              % rows for this group, already sorted by T
     y = GT.Y(idx); d = GT.D(idx);
     if numel(idx) >= 1
         GT.Ylag1(idx) = [NaN; y(1:end-1)];
@@ -235,7 +401,7 @@ DID_plus_t  = dY_join  - dY_stab0;
 DID_minus_t = dY_stab1 - dY_leave;
 
 ByT = table(ut, N10t, N01t, N00t, N11t, DID_plus_t, DID_minus_t, ...
-            'VariableNames', {'t','N10','N01','N00','N11','DID_plus','DID_minus'});
+    'VariableNames', {'t','N10','N01','N00','N11','DID_plus','DID_minus'});
 
 % clean missing
 ByT.N10(isnan(ByT.DID_plus))  = 0;   ByT.DID_plus(isnan(ByT.DID_plus))   = 0;
@@ -283,12 +449,12 @@ if args.ComputePlacebo
     end
 
     Placebo = struct('ByT',table(ut, N100t, N011t, DID_plus_pl_t, DID_minus_pl_t, ...
-                        'VariableNames',{'t','N100','N011','DID_plus_pl','DID_minus_pl'}), ...
-                     'DIDM_pl',DIDM_pl);
+        'VariableNames',{'t','N100','N011','DID_plus_pl','DID_minus_pl'}), ...
+        'DIDM_pl',DIDM_pl);
 end
 
 Diagnostics = struct('Times',ByT.t, 'HasStable0',ByT.N00>0, 'HasStable1',ByT.N11>0, ...
-                     'NSwitchers',NS, 'SharpCellFraction',mean(GT.Dbar==0 | GT.Dbar==1));
+    'NSwitchers',NS, 'SharpCellFraction',mean(GT.Dbar==0 | GT.Dbar==1));
 
 % --- cluster bootstrap (re-estimate FWL each draw)
 SE=NaN; SEJ=NaN; SEL=NaN; SEpl=NaN;
@@ -299,24 +465,24 @@ if B>0
     groupRows = accumarray(Gid, (1:height(GT0))', [numel(uG) 1], @(ix){ix});
     nG = numel(uG);
 
-   b_est  = nan(B,1); bJ = nan(B,1); bL = nan(B,1); bPl = nan(B,1); bCW = nan(B,1);
-for b = 1:B
-    draw = randi(nG, nG, 1);
-    rows = vertcat(groupRows{draw});
-    Tb   = GT0(rows,:);
-    ob   = ch_core_(GT=Tb, B=0, ComputePlacebo=args.ComputePlacebo, Seed=args.Seed, ...
-                    Xnames=args.Xnames, CovarSample=args.CovarSample);
-    b_est(b) = ob.DIDM; 
-    bJ(b)    = ob.DIDM_joiners; 
-    bL(b)    = ob.DIDM_leavers;
-    if args.ComputePlacebo && isfield(ob,'Placebo'), bPl(b) = ob.Placebo.DIDM_pl; end
-    if isfield(ob,'OverallCW'), bCW(b) = ob.OverallCW; end
-end
-SE   = std(b_est,0,1,'omitnan');
-SEJ  = std(bJ,0,1,'omitnan');
-SEL  = std(bL,0,1,'omitnan');
-SEpl = std(bPl,0,1,'omitnan');
-SECW = std(bCW,0,1,'omitnan');
+    b_est  = nan(B,1); bJ = nan(B,1); bL = nan(B,1); bPl = nan(B,1); bCW = nan(B,1);
+    for b = 1:B
+        draw = randi(nG, nG, 1);
+        rows = vertcat(groupRows{draw});
+        Tb   = GT0(rows,:);
+        ob   = ch_core_(GT=Tb, B=0, ComputePlacebo=args.ComputePlacebo, Seed=args.Seed, ...
+            Xnames=args.Xnames, CovarSample=args.CovarSample);
+        b_est(b) = ob.DIDM;
+        bJ(b)    = ob.DIDM_joiners;
+        bL(b)    = ob.DIDM_leavers;
+        if args.ComputePlacebo && isfield(ob,'Placebo'), bPl(b) = ob.Placebo.DIDM_pl; end
+        if isfield(ob,'OverallCW'), bCW(b) = ob.OverallCW; end
+    end
+    SE   = std(b_est,0,1,'omitnan');
+    SEJ  = std(bJ,0,1,'omitnan');
+    SEL  = std(bL,0,1,'omitnan');
+    SEpl = std(bPl,0,1,'omitnan');
+    SECW = std(bCW,0,1,'omitnan');
 
 end
 
@@ -341,71 +507,71 @@ out.OverallCW = OverallCW;      % cohort-weighted overall
 out.SECW      = SECW;           % bootstrap SE for OverallCW
 
     function val = compute_cohort_weighted_overall_(GTmicro, ByTtab)
-    % Build maps t -> DID_plus / DID_minus
-    tvals = ByTtab.t;
-    mapP = containers.Map(num2cell(tvals), num2cell(ByTtab.DID_plus));
-    mapM = containers.Map(num2cell(tvals), num2cell(ByTtab.DID_minus));
+        % Build maps t -> DID_plus / DID_minus
+        tvals = ByTtab.t;
+        mapP = containers.Map(num2cell(tvals), num2cell(ByTtab.DID_plus));
+        mapM = containers.Map(num2cell(tvals), num2cell(ByTtab.DID_minus));
 
-    % For each unit, find first 0->1 (join) time and first 1->0 (leave) time
-    [gU,~,gi] = unique(GTmicro.G,'stable');
-    Tu = GTmicro.T; Du = GTmicro.D;
-    nU = numel(gU);
+        % For each unit, find first 0->1 (join) time and first 1->0 (leave) time
+        [gU,~,gi] = unique(GTmicro.G,'stable');
+        Tu = GTmicro.T; Du = GTmicro.D;
+        nU = numel(gU);
 
-    joinTimes  = NaN(nU,1);
-    leaveTimes = NaN(nU,1);
+        joinTimes  = NaN(nU,1);
+        leaveTimes = NaN(nU,1);
 
-    % indices per unit for fast loop
-    idxPer = accumarray(gi, (1:height(GTmicro))', [nU 1], @(ix){ix});
-    for u = 1:nU
-        ix = idxPer{u};
-        [~,ord] = sort(Tu(ix),'ascend');
-        ix = ix(ord);
-        Dseq = Du(ix);
-        Tseq = Tu(ix);
+        % indices per unit for fast loop
+        idxPer = accumarray(gi, (1:height(GTmicro))', [nU 1], @(ix){ix});
+        for u = 1:nU
+            ix = idxPer{u};
+            [~,ord] = sort(Tu(ix),'ascend');
+            ix = ix(ord);
+            Dseq = Du(ix);
+            Tseq = Tu(ix);
 
-        % first 0->1
-        ch = diff(Dseq);
-        jpos = find(ch==1,1,'first');
-        if ~isempty(jpos), joinTimes(u) = Tseq(jpos+1); end
+            % first 0->1
+            ch = diff(Dseq);
+            jpos = find(ch==1,1,'first');
+            if ~isempty(jpos), joinTimes(u) = Tseq(jpos+1); end
 
-        % first 1->0
-        lpos = find(ch==-1,1,'first');
-        if ~isempty(lpos), leaveTimes(u) = Tseq(lpos+1); end
-    end
+            % first 1->0
+            lpos = find(ch==-1,1,'first');
+            if ~isempty(lpos), leaveTimes(u) = Tseq(lpos+1); end
+        end
 
-    % Counts per cohort (ignore NaNs)
-    if all(isnan(joinTimes)) && all(isnan(leaveTimes))
-        val = NaN; return;
-    end
-    % counts per time
-    [uj,~,cj] = unique(joinTimes(~isnan(joinTimes)),'stable');
-    cntJ = accumarray(cj,1);
-    [ul,~,cl] = unique(leaveTimes(~isnan(leaveTimes)),'stable');
-    cntL = accumarray(cl,1);
+        % Counts per cohort (ignore NaNs)
+        if all(isnan(joinTimes)) && all(isnan(leaveTimes))
+            val = NaN; return;
+        end
+        % counts per time
+        [uj,~,cj] = unique(joinTimes(~isnan(joinTimes)),'stable');
+        cntJ = accumarray(cj,1);
+        [ul,~,cl] = unique(leaveTimes(~isnan(leaveTimes)),'stable');
+        cntL = accumarray(cl,1);
 
-    SJ = sum(cntJ); SL = sum(cntL); S = SJ + SL;
-    if S==0, val = NaN; return; end
+        SJ = sum(cntJ); SL = sum(cntL); S = SJ + SL;
+        if S==0, val = NaN; return; end
 
-    % cohort-weighted average over joiner and leaver cohorts
-    agg = 0.0;
-    if ~isempty(cntJ)
-        for k=1:numel(uj)
-            tk = uj(k);
-            if isKey(mapP, tk)
-                agg = agg + (cntJ(k)/S) * mapP(tk);
+        % cohort-weighted average over joiner and leaver cohorts
+        agg = 0.0;
+        if ~isempty(cntJ)
+            for k=1:numel(uj)
+                tk = uj(k);
+                if isKey(mapP, tk)
+                    agg = agg + (cntJ(k)/S) * mapP(tk);
+                end
             end
         end
-    end
-    if ~isempty(cntL)
-        for k=1:numel(ul)
-            tk = ul(k);
-            if isKey(mapM, tk)
-                agg = agg + (cntL(k)/S) * mapM(tk);
+        if ~isempty(cntL)
+            for k=1:numel(ul)
+                tk = ul(k);
+                if isKey(mapM, tk)
+                    agg = agg + (cntL(k)/S) * mapM(tk);
+                end
             end
         end
+        val = agg;
     end
-    val = agg;
-end
 
 end
 

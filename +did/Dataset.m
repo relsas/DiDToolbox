@@ -12,7 +12,10 @@ classdef Dataset
     %   ds2 = ds.subset(mask);       % filtered new Dataset (no mutation)
     %   ds3 = ds.withWeights("w2");  % switch weight variable (validated)
     %   TT  = ds.materialize("t_int","g","eventTime","weights"); % table view incl. helpers
-
+    %
+    % -----------------------------------------------------------------------------------
+    %  Dr. Ralf Elsas-Nicolle, Last change: 11/07/2025
+    % -----------------------------------------------------------------------------------
     properties (SetAccess=immutable)
         T table
         idVar   (1,1) string
@@ -61,15 +64,26 @@ classdef Dataset
                 end
             end
 
-            % ---- Defaults ----
+            % ---- Defaults & Robustness ----
+            % Force string conversion for key vars if they exist
+            if isfield(opts,'idVar'), opts.idVar = string(opts.idVar); end
+            if isfield(opts,'timeVar'), opts.timeVar = string(opts.timeVar); end
+            if isfield(opts,'yVar'), opts.yVar = string(opts.yVar); end
+            if isfield(opts,'dVar'), opts.dVar = string(opts.dVar); end
+            if isfield(opts,'weightVar'), opts.weightVar = string(opts.weightVar); end
+
             if ~isfield(opts,'idVar'),            opts.idVar = "";            end
             if ~isfield(opts,'timeVar'),          opts.timeVar = "";          end
             if ~isfield(opts,'yVar'),             opts.yVar = "";             end
             if ~isfield(opts,'dVar'),             opts.dVar = "";             end
+            if ~isfield(opts,'gVar'),             opts.gVar = "";             end
             if ~isfield(opts,'weightVar'),        opts.weightVar = string.empty; end
             if ~isfield(opts,'computeEventTime'), opts.computeEventTime = true;   end
             if ~isfield(opts,'describe'),         opts.describe = true;          end
-            if ~isfield(opts,'Print'),         opts.Print = true;          end
+            if ~isfield(opts,'Display'),         opts.Display = true;          end
+
+            % Sort data
+            T2 = sortrows(T, [string(opts.idVar), string(opts.timeVar)]);
 
             % ---- Require the core four ----
             if strlength(string(opts.idVar))==0 || strlength(string(opts.timeVar))==0 || ...
@@ -78,18 +92,24 @@ classdef Dataset
                     'idVar, timeVar, yVar, and dVar must be provided.');
             end
             % 1) Lightweight structural validation
-            did.utils.validatePanel(T, opts.idVar, opts.timeVar, opts.yVar, opts.dVar, opts.weightVar);
+            did.utils.validatePanel(T2, opts.idVar, opts.timeVar, opts.yVar, opts.dVar, opts.weightVar);
+
+            % Add cohort identifier gVar
+
+            [T2, gname] = did.utils.ensureGvar(T2, opts.idVar, opts.timeVar, opts.dVar);
 
             % 2) Optional rich diagnostics (reuses your existing function)
             dsDesc = [];
-            if opts.describe && opts.Print
-                dsDesc = did.dataDesc(T, ...
+            if opts.describe && opts.Display
+                dsDesc = did.dataDesc(T2, ...
                     idVar=opts.idVar, timeVar=opts.timeVar, dVar=opts.dVar, ...
                     yVar=opts.yVar, Display=true);
             end
 
             % 3) Construct (no mutation of T)
-            ds = did.Dataset(T, opts.idVar, opts.timeVar, opts.yVar, opts.dVar, opts.weightVar);
+            ds = did.Dataset(T2, opts.idVar, opts.timeVar, opts.yVar, opts.dVar, opts.weightVar);
+            % prime cache for consistency/perf
+            ds.Cache.g = ds.T.gVar;
             ds.Info.Description       = dsDesc;
             ds.Info.CreatedOn         = datetime('now');
             ds.Info.ComputeEventTime  = opts.computeEventTime;  % informational
@@ -108,7 +128,7 @@ classdef Dataset
                     v = ds.Cache.t_int;
 
                 case "g"
-                    if ~isfield(ds.Cache,'g')
+                    if ~isfield(ds.Cache,'g') & any(~ismember(ds.T.Properties.VariableNames,"gVar"))
                         % Build via the exact same helper used elsewhere so results match
                         [T2, gname] = did.utils.ensureGvar(ds.T, ds.idVar, ds.timeVar, ds.dVar);
                         ds.Cache.g = T2.(gname);  % numeric: time label (or 0)

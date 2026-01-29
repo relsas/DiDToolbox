@@ -20,6 +20,7 @@ arguments
     opts.timeVar (1,1) string = ""
     opts.dVar    (1,1) string = ""
     opts.yVar    string = ""
+    opts.gVar    string = "gVar"
     opts.Display (1,1) logical = true
 end
 

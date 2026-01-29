@@ -13,7 +13,7 @@ Alpha = ip.Results.Alpha;
 crit = norminv(0.5+Alpha/2);
 
 S = struct('es',[],'byCohort',[],'calendar',[],'overall',[], ...
-           'support',[],'chCohortLines',[]);
+    'support',[],'chCohortLines',[],'V_es',[]);
 
 % --------- IW (HGardner IW) ----------
 % Accept Estimator tags like "SA", "SA_IW", and prefer res.es / res.Aggregates.es
@@ -65,8 +65,25 @@ if isfield(res,'details')
     D = res.details;
     if isfield(D,'attByEventTime') && istable(D.attByEventTime)
         T = D.attByEventTime;
-        T.Properties.VariableNames(1) = {'e'};
-        S.es = table(T.e, T.ATT_hat_mean, 'VariableNames', {'e','Estimate'});
+        % Map EventTime -> e
+        if ismember('EventTime', T.Properties.VariableNames)
+            T.Properties.VariableNames{'EventTime'} = 'e';
+        else
+            T.Properties.VariableNames{1} = 'e';
+        end
+
+        % Map Estimate
+        if ismember('Estimate', T.Properties.VariableNames)
+            % Good
+        elseif ismember('ATT_hat_mean', T.Properties.VariableNames)
+            T.Estimate = T.ATT_hat_mean;
+        end
+
+        S.es = table(T.e, T.Estimate, 'VariableNames', {'e','Estimate'});
+        if ismember('SE', T.Properties.VariableNames)
+            S.es.SE = T.SE;
+            S.es = ensure_bands_(S.es, crit);
+        end
     end
     if isfield(D,'ATTbyCohort') && istable(D.ATTbyCohort)
         T = D.ATTbyCohort; % expects Cohort, ATT(k), [SE]
@@ -82,6 +99,9 @@ if isfield(res,'details')
         if ~ismember('k', S.support.Properties.VariableNames)
             S.support.Properties.VariableNames{1} = 'k';
         end
+    end
+    if isfield(D,'V_es') && ~isempty(D.V_es)
+        S.V_es = D.V_es;
     end
     return
 end

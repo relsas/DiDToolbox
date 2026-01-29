@@ -7,7 +7,7 @@ function out = cs_estimator(T, opts)
 %
 % ------------------------------------------------------------------------
 % Dr. Ralf Elsas-Nicolle, LMU Munich, Germany
-% Last change: 10/13/2025  (patched: Weighting="cohortShare"|"treatedObs")
+% Last change: 11/17/2025
 % ------------------------------------------------------------------------
 
 arguments
@@ -16,6 +16,7 @@ arguments
     % Required names in T
     opts.idVar       (1,1) string = "id"
     opts.timeVar     (1,1) string = "time"
+    opts.PreTrendBase (1,1) string {mustBeMember(opts.PreTrendBase, ["universal","varying","first","last"])} = "universal"
     opts.yVar        (1,1) string = "y"
     opts.dVar        (1,1) string = "D"
 
@@ -24,31 +25,31 @@ arguments
     opts.Covariates         string = string.empty
 
     % Core controls
-    opts.Approach    (1,1) string {mustBeMember(opts.Approach,["unconditional","or","ipw","dr"])} = "unconditional"
-    opts.Comparison  (1,1) string {mustBeMember(opts.Comparison,["never","notyet"])} = "never"
+    opts.Approach    (1,1) string {mustBeMember(opts.Approach, ["unconditional","or","ipw","dr"])} = "unconditional"
+    opts.Comparison  (1,1) string {mustBeMember(opts.Comparison, ["never","notyet"])} = "never"
     opts.Delta       (1,1) double {mustBeInteger, mustBeNonnegative} = 0
 
     % NEW: Aggregation weighting toggle
     % "cohortShare" (current default behavior) vs "treatedObs" (post-only treated counts per (g,t))
-    opts.Weighting   (1,1) string {mustBeMember(opts.Weighting,["cohortShare","treatedObs"])} = "treatedObs"
+    opts.Weighting   (1,1) string {mustBeMember(opts.Weighting, ["cohortShare","treatedObs"])} = "treatedObs"
 
     % Inference controls
-    opts.SEMethod    (1,1) string {mustBeMember(opts.SEMethod,["multiplier","clustered","clustered2"])} = "multiplier"
+    opts.SEMethod    (1,1) string {mustBeMember(opts.SEMethod, ["multiplier","clustered","clustered2"])} = "multiplier"
     opts.B           (1,1) double {mustBeInteger, mustBeNonnegative} = 0
     opts.Seed        (1,1) double = randi([1,1000],1,1)
-    opts.Multiplier  (1,1) string {mustBeMember(opts.Multiplier,["rademacher","mammen"])} = "rademacher"
+    opts.Multiplier  (1,1) string {mustBeMember(opts.Multiplier, ["rademacher","mammen"])} = "rademacher"
     opts.Studentize  (1,1) logical = true
     opts.ClusterVar          string = string.empty
     opts.ClusterVar2         string = string.empty
     opts.SmallSample (1,1) logical = true
     opts.UseParallel (1,1) logical = false
-    opts.Details     (1,1) logical = false
-    opts.Print       (1,1) logical = true
+    opts.details     (1,1) logical = false
+    opts.Display       (1,1) logical = true
 
     % Cross-fitting controls
     opts.CrossFit    (1,1) logical = false
-    opts.Kfolds      (1,1) double {mustBeInteger, mustBeGreaterThanOrEqual(opts.Kfolds,2)} = 5
-    opts.StratifyFoldsBy (1,1) string {mustBeMember(opts.StratifyFoldsBy,["none","cohort"])} = "none"
+    opts.Kfolds      (1,1) double {mustBeInteger, mustBeGreaterThanOrEqual(opts.Kfolds, 2)} = 5
+    opts.StratifyFoldsBy (1,1) string {mustBeMember(opts.StratifyFoldsBy, ["none","cohort"])} = "none"
 end
 
 % ----- Guards / normalization -----
@@ -170,15 +171,51 @@ g_list  = []; t_list = [];
 ATT     = [];
 psiCols = {};                   % each is N x 1 (ψ_i for this cell)
 cell_wt = [];                   % NEW: per-(g,t) treated-post weight (Wtreat)
+is_ref_list = [];               % NEW: track reference cells
 
 for g = Gs
-    refT  = g - opts.Delta - 1;
-    refIx = find(Tnums == refT, 1);
-    if isempty(refIx), continue; end
+    % Reference period for Post-Treatment (Standard CS: g-1)
+    if opts.PreTrendBase == "first"
+        univRefIx = find(Tnums == min(Tnums), 1);
+    elseif opts.PreTrendBase == "last"
+        % Not standard, but for completeness (e.g. max T)
+        univRefIx = find(Tnums == max(Tnums), 1);
+    else
+        universalRefT = g - opts.Delta - 1;
+        univRefIx     = find(Tnums == universalRefT, 1);
+    end
+
+    if isempty(univRefIx), continue; end
 
     for ti = 1:numel(Tnums)
         t = Tnums(ti);
-        if t < g, continue; end   % post
+
+        % Determine reference time for this ATT(g,t)
+        % Post-treatment (t >= g): Always universal (g-Delta-1)
+        % Pre-treatment (t < g):
+        %   - If "universal": g-Delta-1
+        %   - If "varying":   t-1 (tests parallel trends in specific period)
+        if t >= g
+            refIx = univRefIx;
+        else
+            % Pre-treatment
+            if opts.PreTrendBase == "varying"
+                % "Stata-style": Ref is t-1
+                % Note: t is Tnum(ti). We need index of t-1.
+                preRefT = t - 1;
+                refIx   = find(Tnums == preRefT, 1);
+
+                % If we can't find t-1 (e.g. t=min(T)), we cannot compute this pre-trend check.
+                if isempty(refIx), continue; end
+            else
+                refIx = univRefIx;
+            end
+        end
+
+        %%%% CHANGED: previously we skipped t<g (so no pre-period cells).
+        %%%% We now *keep* all t for which we can form the long difference
+        %%%% Y_t - Y_{g-Δ-1}. For t<g these are "pseudo" pre-trend effects.
+        % if t < g, continue; end   % post-only (OLD LINE, REMOVE)
 
         % Long difference ΔY = Y_t - Y_ref
         dY   = Yt(:,ti) - Yt(:,refIx);
@@ -191,14 +228,18 @@ for g = Gs
             case "never"
                 comp_u = (Cunit==1) & valid;
             case "notyet"
-                comp_u = (G > (t + opts.Delta)) & valid;   % includes never-treated since inf > ...
+                %%%% CHANGED: exclude cohort g itself from the comparison group.
+                %%%% This only matters in pre-periods where G=g are also "not-yet-treated".
+                comp_u = (G > (t + opts.Delta)) & (G ~= g) & valid;   % includes never-treated since inf > ...
         end
         eligible = (treat_u | comp_u);
         if ~any(treat_u) || ~any(comp_u), continue; end
 
         W_all  = nansum(wt_u(eligible));
-        Wtreat = nansum(wt_u(treat_u));      % ← NEW: store this for treatedObs weighting
+        Wtreat = nansum(wt_u(treat_u));      % per-(g,t) treated/post weight
         Wcomp  = nansum(wt_u(comp_u));
+
+
         if W_all<=0 || Wtreat<=0 || Wcomp<=0, continue; end
 
         p_treat = Wtreat / W_all;
@@ -382,12 +423,13 @@ for g = Gs
                 end
         end
 
-        names(end+1,1) = "ATT(g="+string(g)+", t="+string(t)+")"; %#ok<AGROW>
-        g_list(end+1,1) = g;                                       %#ok<AGROW>
-        t_list(end+1,1) = t;                                       %#ok<AGROW>
-        ATT(end+1,1)    = att;                                     %#ok<AGROW>
-        psiCols{end+1}  = psi;                                     %#ok<AGROW>
-        cell_wt(end+1,1)= Wtreat;                                  %#ok<AGROW> % NEW
+        names(end+1,1) = "ATT(g="+string(g)+", t="+string(t)+")";
+        g_list(end+1,1) = g;
+        t_list(end+1,1) = t;
+        ATT(end+1,1)    = att;
+        psiCols{end+1}  = psi;
+        cell_wt(end+1,1)= Wtreat;
+        is_ref_list(end+1,1) = (ti == refIx);
     end
 end
 
@@ -402,13 +444,26 @@ Psi_ctr = Psi - mean(Psi,1);        % centered ψ for multiplier bootstrap
 Psi_unc(~isfinite(Psi_unc)) = 0;
 
 % ---- Diagnostics for Vcov engines (CS Wild Cluster, etc.) ----
+% (extended to serve as starting point for Honest DiD / Rambachan–Roth)
+e_list = t_list - g_list;   % event-time index: e = t - g (post only here)
+
 diagCS = struct( ...
-    'Psi_unc', Psi_unc, ...
-    'idIdx',   idIdx, ...
-    'ATT',     ATT, ...
-    'names',   names, ...
-    'g_list',  g_list, ...
-    't_list',  t_list );
+    'Psi_unc',     Psi_unc, ...      % N x R uncentered influence functions
+    'idIdx',       idIdx,   ...      % unit index 1..N
+    'ATT',         ATT,     ...      % R x 1 cell-level θ̂(g,t)
+    'names',       names,   ...      % cell labels "ATT(g=..., t=...)"
+    'g_list',      g_list,  ...      % R x 1 cohort index g
+    't_list',      t_list,  ...      % R x 1 time index t (in Tvals order)
+    'e_list',      e_list,  ...      % R x 1 event-time e = t - g
+    'TimeValues',  Tvals,   ...      % unique labels of timeVar (calendar time)
+    'Delta',       opts.Delta, ...   % anticipation window used for ref period
+    'CellWeights', cell_wt, ...      % R x 1 W_treat per (g,t) cell
+    'Weighting',   opts.Weighting, ...   % "cohortShare" | "treatedObs"
+    'SEMethod',    SEMethod, ...         % "multiplier" | "clustered" | "clustered2"
+    'ClusterVar',  opts.ClusterVar, ...  % first cluster (if any)
+    'ClusterVar2', opts.ClusterVar2 ...  % second cluster (if any)
+    );
+
 
 % ---------- Inference ----------
 SE   = NaN(R,1); tStat = NaN(R,1); pValue = NaN(R,1);
@@ -500,11 +555,11 @@ end
 
 % ---------- Summary (cells) ----------
 summaryTable = table(names, repmat("ATT(g,t)",R,1), ATT, g_list, t_list, ...
-    SE, tStat, pValue, ...
-    'VariableNames', {'Name','Effect','Estimate','g','t','SE','tStat','pValue'});
+    SE, tStat, pValue, logical(is_ref_list), ...
+    'VariableNames', {'Name','Effect','Estimate','g','t','SE','tStat','pValue','IsRef'});
 
 % ---------- Aggregations + year labels (one line) ----------
-[summaryTable, Agg] = make_aggregates_( ...
+[summaryTable, Agg] = did.cs_agg( ...
     summaryTable, ATT, g_list, t_list, G, ...
     att_b, S_for_aggs, ...
     'TimeValues', Tvals, ...   % ordered unique labels of your timeVar
@@ -522,8 +577,8 @@ else
 end
 
 out.Method = "CS2021 (" + Approach + "; " + Comparison + ...
-             "; δ=" + string(opts.Delta) + ", SE=" + SEMethod + cfTag + ...
-             "; W=" + string(opts.Weighting) + ")";
+    "; δ=" + string(opts.Delta) + ", SE=" + SEMethod + cfTag + ...
+    "; W=" + string(opts.Weighting) + ")";
 
 out.Params       = opts;
 out.summaryTable = summaryTable;
@@ -534,11 +589,20 @@ if ~isfield(out,'Diagnostics') || ~isstruct(out.Diagnostics)
 end
 out.Diagnostics.cs = diagCS;
 
-if opts.Print
+if opts.Display
+    fprintf('[CS] DepVar: %s\n', opts.yVar);
+    fprintf('[CS] Obs: %d | Units: %d | Time: %d\n', ...
+        height(T), numel(unique(T.(opts.idVar))), numel(unique(T.(opts.timeVar))));
+    fprintf('[CS] Fixed Effects: Unit, Time (implicit in DiD)\n');
     fprintf('[CS] R=%d cells; Approach=%s; Comp=%s; δ=%d; SE=%s%s; W=%s. ', ...
         R, Approach, Comparison, opts.Delta, SEMethod, cfTag, string(opts.Weighting));
     if SEMethod=="multiplier" && opts.B>0
         fprintf('Bootstrap B=%d, crit(95%%)=%.3f\n', opts.B, Bands.crit);
+    elseif SEMethod=="clustered" || SEMethod=="clustered2"
+        clusters = opts.ClusterVar;
+        if SEMethod=="clustered2", clusters = [clusters, opts.ClusterVar2]; end
+        if isempty(clusters), clusters="id"; end
+        fprintf('Clustered by %s\n', join(clusters, ", "));
     else
         fprintf('\n');
     end
@@ -550,8 +614,10 @@ if opts.Print
         display(out.Aggregates.overall);
     end
 
-    fprintf('[CS] Estimates \n');
-    display(out.summaryTable)
+    if opts.details
+        fprintf('[CS] Estimates (ATT(g,t)) \n');
+        display(out.summaryTable)
+    end
 
     fprintf('[CS] By Cohort \n');
     display(out.Aggregates.byCohort);
@@ -637,69 +703,98 @@ end
 
 function [cIdx, C, report] = cluster_index_per_unit_(T, idIdx, N, varname, defaultUnit)
 % Map row-level cluster var -> unit-constant cluster index
-    report = struct('var',string(varname),'nUnits',N,'nClusters',NaN, ...
-                    'nConflictedUnits',0,'conflictedUnitExamples',[]);
+report = struct('var',string(varname),'nUnits',N,'nClusters',NaN, ...
+    'nConflictedUnits',0,'conflictedUnitExamples',[]);
 
-    useUnit = defaultUnit || isempty(varname) || ~any(strcmp(varname, T.Properties.VariableNames));
-    if useUnit
-        cIdx = (1:N).';   % each unit its own cluster
-        C    = N;
-        report.nClusters = C;
-        return;
-    end
+useUnit = defaultUnit || isempty(varname) || ~any(strcmp(varname, T.Properties.VariableNames));
+if useUnit
+    cIdx = (1:N).';   % each unit its own cluster
+    C    = N;
+    report.nClusters = C;
+    return;
+end
 
-    v = T.(varname);
-    if iscellstr(v) || isstring(v) || iscategorical(v)
-        v = string(v); isStr = true;
-    else
-        v = double(v); isStr = false;
-    end
+v = T.(varname);
+if iscellstr(v) || isstring(v) || iscategorical(v)
+    v = string(v); isStr = true;
+else
+    v = double(v); isStr = false;
+end
 
-    cPerUnit = NaN(N,1); nConf = 0; ex = [];
-    for i = 1:N
-        rows = (idIdx == i);
-        vi   = v(rows);
-        if isStr, vi = vi(~ismissing(vi)); else, vi = vi(~isnan(vi)); end
-        if isempty(vi), continue; end
-        if isStr
-            uv = unique(vi);
-            if numel(uv) > 1, nConf = nConf + 1; if numel(ex) < 5, ex = [ex; i]; end, end %#ok<AGROW>
-            [~,idx] = max(histcounts(categorical(vi), categorical(uv)));
-            cPerUnit(i) = double(categorical(uv(idx)));
+cPerUnit    = NaN(N,1);
+cPerUnitStr = strings(N,1);
+
+nConf = 0; ex = [];
+for i = 1:N
+    rows = (idIdx == i);
+    vi   = v(rows);
+    if isStr, vi = vi(~ismissing(vi)); else, vi = vi(~isnan(vi)); end
+    if isempty(vi), continue; end
+
+    if isStr
+        uv = unique(vi);
+        if numel(uv) > 1, nConf = nConf + 1; if numel(ex) < 5, ex = [ex; i]; end, end %#ok<AGROW>
+
+        % Mode/First
+        if numel(uv)==1
+            valStr = uv;
         else
-            uv = unique(vi);
-            if numel(uv) > 1, nConf = nConf + 1; if numel(ex) < 5, ex = [ex; i]; end, end %#ok<AGROW>
-            [vals,~,ic] = unique(vi);
-            cnts = accumarray(ic, 1);
-            [~,k] = max(cnts);
-            cPerUnit(i) = vals(k);
+            [~,idx] = max(histcounts(categorical(vi), categorical(uv)));
+            valStr = uv(idx);
         end
+        cPerUnitStr(i) = valStr;
+    else
+        uv = unique(vi);
+        if numel(uv) > 1, nConf = nConf + 1; if numel(ex) < 5, ex = [ex; i]; end, end %#ok<AGROW>
+        [vals,~,ic] = unique(vi);
+        cnts = accumarray(ic, 1);
+        [~,k] = max(cnts);
+        cPerUnit(i) = vals(k);
     end
+end
 
+if isStr
+    active = (strlength(cPerUnitStr) > 0);
+    [~, ~, idx] = unique(cPerUnitStr(active), 'stable');
+    % scatter back to N
+    cIdx = NaN(N,1);
+    cIdx(active) = idx;
+
+    if any(~active)
+        nanMask = ~active;
+        cIdx(nanMask) = max(idx,[],'all', 'omitnan') + (1:sum(nanMask))';
+    end
+else
     if any(isnan(cPerUnit))
         nanMask = isnan(cPerUnit);
         cPerUnit(nanMask) = - (1:sum(nanMask));
     end
-
     [~, ~, idx] = unique(cPerUnit, 'stable');
-    cIdx = idx; C = max(cIdx);
+    cIdx = idx;
+end
 
-    report.nClusters = C;
-    report.nConflictedUnits = nConf;
-    report.conflictedUnitExamples = ex;
+C = max(cIdx);
 
-    if nConf > 0
-        warning('did:cs:clusterVarNotUnitConstant', ...
-            'ClusterVar "%s" is not unit-constant for %d units (e.g., unit(s) %s). Using modal value per unit.', ...
-            string(varname), nConf, mat2str(ex(:).'));
-    end
+report.nClusters = C;
+report.nConflictedUnits = nConf;
+report.conflictedUnitExamples = ex;
+
+if nConf > 0
+    warning('did:cs:clusterVarNotUnitConstant', ...
+        'ClusterVar "%s" is not unit-constant for %d units (e.g., unit(s) %s). Using modal value per unit.', ...
+        string(varname), nConf, mat2str(ex(:).'));
+end
 end
 
 function S = cluster_sums_(Psi_unc, cIdx)
-if size(Psi_unc,1) < size(Psi_unc,2), Psi_unc = Psi_unc.'; end
-N = size(Psi_unc,1);
-if numel(cIdx) ~= N
-    error('did:cs:clusterIndexSize','cIdx length (%d) must match number of units N (%d).', numel(cIdx), N);
+% Ensure Psi_unc is N x R (where N = numel(cIdx))
+N = numel(cIdx);
+if size(Psi_unc,1) ~= N && size(Psi_unc,2) == N
+    Psi_unc = Psi_unc.';
+end
+
+if size(Psi_unc,1) ~= N
+    error('did:cs:clusterIndexSize','cIdx length (%d) must match Psi_unc rows (%d). (N vs R ambiguity?)', N, size(Psi_unc,1));
 end
 R = size(Psi_unc,2); C = max(cIdx);
 S = zeros(R, C);
@@ -730,347 +825,7 @@ Bands = struct('alpha',0.95,'crit',crit,'lower',ATT-crit.*SE,'upper',ATT+crit.*S
 S_out = S;
 end
 
-function [summaryTable, Agg] = make_aggregates_( ...
-        summaryTable_in, ...
-        ATT, g_list, t_list, ...
-        G, att_b, Sinfo, varargin)
 
-ip = inputParser;
-addParameter(ip,'TimeValues',[]);
-addParameter(ip,'Delta',0);
-% NEW params:
-addParameter(ip,'CellWeights',[]);         % length R: Wtreat per (g,t)
-addParameter(ip,'Weighting',"cohortShare");
-parse(ip,varargin{:});
-TimeValues = ip.Results.TimeValues;
-Delta      = ip.Results.Delta;
-CellWts    = ip.Results.CellWeights(:);
-Weighting  = lower(string(ip.Results.Weighting));
-
-labelFrom = @(idx) map_labels_(idx, TimeValues);
-
-summaryTable = summaryTable_in;
-summaryTable.gYear   = labelFrom(summaryTable.g);
-summaryTable.tYear   = labelFrom(summaryTable.t);
-summaryTable.refYear = labelFrom(summaryTable.g - Delta - 1);
-
-% cohort-share weights (existing behavior)
-Gfinite = G(~isinf(G));
-[uG,~,ic] = unique(Gfinite,'stable');
-countG = accumarray(ic, 1, [numel(uG),1], @sum, 0);
-wG = countG / max(sum(countG),1);
-wGmap = containers.Map(num2cell(uG), num2cell(wG));
-wg = @(gv) arrayfun(@(x) wGmap(x), gv);
-
-% --- NEW: select a weight accessor w_fun(I) that returns a vector of weights per subset of cells I
-% * cohortShare: w_fun(I) = wg(g_list(I))
-% * treatedObs : w_fun(I) = CellWts(I)
-w_fun = @(I) wg(g_list(I));   % default
-if Weighting == "treatedobs"
-    if isempty(CellWts) || numel(CellWts) ~= numel(ATT)
-        warning('did:cs:treatedObsWeightsMissing','CellWeights missing or wrong length; falling back to cohortShare.');
-    else
-        w_fun = @(I) CellWts(I);
-    end
-end
-
-% event-time
-e_list   = t_list - g_list;
-Evals    = unique(e_list(e_list>=0));
-theta_es = NaN(numel(Evals),1);
-for k=1:numel(Evals)
-    ek = Evals(k); I  = find(e_list==ek);
-    if ~isempty(I)
-        w = w_fun(I);
-        theta_es(k) = nansum( w .* ATT(I) ) / max(nansum(w), eps);
-    end
-end
-
-% calendar-time
-Tuniq   = unique(t_list);
-theta_c = NaN(numel(Tuniq),1);
-for k=1:numel(Tuniq)
-    tk = Tuniq(k);
-    I  = find(t_list==tk & g_list<=tk);
-    if ~isempty(I)
-        w = w_fun(I);
-        theta_c(k) = nansum( w .* ATT(I) ) / max(nansum(w), eps);
-    end
-end
-
-% by-cohort (keep your original simple mean; can be swapped to weighted if desired)
-Guniq    = unique(g_list);
-theta_g  = NaN(numel(Guniq),1);
-for k=1:numel(Guniq)
-    gk = Guniq(k);
-    I  = find(g_list==gk & t_list>=gk);
-    theta_g(k) = mean(ATT(I),'omitnan');
-end
-
-% overall
-pick_post   = (t_list>=g_list);
-I_all       = find(pick_post);
-w_all_cells = w_fun(I_all);
-theta_OW = nansum( w_all_cells .* ATT(I_all) ) / max(nansum(w_all_cells),eps);
-
-% inference for aggregates
-if ~isempty(att_b)
-    [es_tab, es_crit]   = agg_infer_(theta_es, build_draws_(Evals,  e_list, g_list, t_list, att_b, w_fun, 'event'));
-    [cal_tab, cal_crit] = agg_infer_(theta_c,  build_draws_(Tuniq,  t_list, g_list, t_list, att_b, w_fun, 'calendar'));
-    [sel_tab, sel_crit] = agg_infer_(theta_g,  build_draws_(Guniq,  g_list, t_list, t_list, att_b, w_fun, 'cohort'));
-    [ow_tab,  ow_crit]  = agg_infer_(theta_OW, build_draws_(NaN,    [],     g_list, t_list, att_b, w_fun, 'overall', pick_post));
-    Agg.es       = addvars(table(Evals,'VariableNames',{'e'}), es_tab.Estimate, es_tab.SE, es_tab.tStat, es_tab.pValue, es_tab.LB, es_tab.UB, ...
-        'NewVariableNames',{'Estimate','SE','tStat','pValue','LB','UB'});
-    Agg.calendar = addvars(table(Tuniq,'VariableNames',{'t'}), cal_tab.Estimate, cal_tab.SE, cal_tab.tStat, cal_tab.pValue, cal_tab.LB, cal_tab.UB, ...
-        'NewVariableNames',{'Estimate','SE','tStat','pValue','LB','UB'});
-    Agg.byCohort = addvars(table(Guniq,'VariableNames',{'g'}), sel_tab.Estimate, sel_tab.SE, sel_tab.tStat, sel_tab.pValue, sel_tab.LB, sel_tab.UB, ...
-        'NewVariableNames',{'Estimate','SE','tStat','pValue','LB','UB'});
-    Agg.overall  = ow_tab;
-    Agg.Crit     = struct('es',es_crit,'calendar',cal_crit,'byCohort',sel_crit,'overall',ow_crit);
-else
-    if ~isempty(Sinfo)
-       W_es   = weight_matrix_(Evals,  e_list, g_list, t_list, w_fun, 'event');
-       W_cal  = weight_matrix_(Tuniq,  t_list, g_list, t_list, w_fun, 'calendar');
-       W_sel  = weight_matrix_(Guniq,  g_list, t_list, t_list, w_fun, 'cohort');
-       W_over = weight_matrix_(NaN,    [],     g_list, t_list, w_fun, 'overall', pick_post);
-
-       [SE_es, t_es, p_es, LB_es, UB_es] = var_from_S_lincombo_(theta_es, W_es,  Sinfo);
-       [SE_c,  t_c,  p_c,  LB_c,  UB_c ] = var_from_S_lincombo_(theta_c,  W_cal, Sinfo);
-       [SE_g,  t_g,  p_g,  LB_g,  UB_g ] = var_from_S_lincombo_(theta_g,  W_sel, Sinfo);
-       [SE_ow, t_ow, p_ow, LB_ow, UB_ow] = var_from_S_lincombo_(theta_OW, W_over, Sinfo);
-
-        Agg.es       = table(Evals, theta_es, SE_es, t_es, p_es, LB_es, UB_es, ...
-            'VariableNames',{'e','Estimate','SE','tStat','pValue','LB','UB'});
-        Agg.calendar = table(Tuniq, theta_c,  SE_c,  t_c,  p_c,  LB_c,  UB_c, ...
-            'VariableNames',{'t','Estimate','SE','tStat','pValue','LB','UB'});
-        Agg.byCohort = table(Guniq, theta_g,  SE_g,  t_g,  p_g,  LB_g,  UB_g, ...
-            'VariableNames',{'g','Estimate','SE','tStat','pValue','LB','UB'});
-        Agg.overall  = struct('Estimate',theta_OW,'SE',SE_ow,'tStat',t_ow,'pValue',p_ow,'LB',LB_ow,'UB',UB_ow,'crit',1.96);
-        Agg.Crit     = struct('es',1.96,'calendar',1.96,'byCohort',1.96,'overall',1.96);
-    else
-        Agg.es       = table(Evals, theta_es, 'VariableNames',{'e','Estimate'});
-        Agg.calendar = table(Tuniq, theta_c,  'VariableNames',{'t','Estimate'});
-        Agg.byCohort = table(Guniq, theta_g,  'VariableNames',{'g','Estimate'});
-        Agg.overall  = struct('Estimate',theta_OW,'SE',NaN,'tStat',NaN,'pValue',NaN,'LB',NaN,'UB',NaN,'crit',NaN);
-        Agg.Crit     = struct('es',NaN,'calendar',NaN,'byCohort',NaN,'overall',NaN);
-    end
-end
-
-% labels on aggregates
-if istable(Agg.byCohort) && ismember('g', Agg.byCohort.Properties.VariableNames)
-    Agg.byCohort.gYear = labelFrom(Agg.byCohort.g);
-end
-if istable(Agg.calendar) && ismember('t', Agg.calendar.Properties.VariableNames)
-    Agg.calendar.tYear = labelFrom(Agg.calendar.t);
-end
-end
-
-% ====== nested helpers (scoped) ======
-function outL = map_labels_(idx, L)
-    if isempty(L), outL = idx; return; end
-    L = L(:);
-    outL = repmat(missingLike_(L), size(idx));
-    valid = idx >= 1 & idx <= numel(L) & isfinite(idx);
-    if any(valid)
-        if isdatetime(L)
-            tmp = NaT(size(idx)); tmp(valid) = L(idx(valid)); outL = tmp;
-        elseif isstring(L) || iscellstr(L)
-            tmp = strings(size(idx)); tmp(valid) = string(L(idx(valid))); outL = tmp;
-        elseif iscategorical(L)
-            tmp = categorical(missing(size(idx))); %#ok<CTPCT>
-            tmp(valid) = L(idx(valid)); outL = tmp;
-        else
-            tmp = NaN(size(idx)); tmp(valid) = double(L(idx(valid))); outL = tmp;
-        end
-    end
-end
-
-function m = missingLike_(L)
-    if isdatetime(L),      m = NaT;
-    elseif isstring(L),    m = string(missing);
-    elseif iscategorical(L), m = categorical(missing);
-    else,                  m = NaN;
-    end
-end
-
-
-function A = weight_matrix_(axisVals, a_list, b_list, t_list, w_fun, kind, pick_post)
-% Builds linear-combo matrix A so that theta = A * ATT (for variance via S)
-% a_list / b_list correspond to the first / second index that define cells.
-R = numel(b_list);  %#ok<NASGU> % (only used implicitly through find on conditions)
-if nargin==7 && strcmpi(string(kind),'overall')
-    % overall: single row
-    A = zeros(1, numel(t_list));
-    I = find(pick_post);
-    if ~isempty(I)
-        w = w_fun(I);
-        A(1, I) = w / max(sum(w), eps);
-    end
-    return
-end
-
-knd = "event"; if nargin>=6 && ~isempty(kind), knd = lower(string(kind)); end
-Rcells = numel(t_list);
-A = zeros(0, Rcells); % will set below
-
-switch knd
-    case "calendar"
-        Tuniq = axisVals;
-        A = zeros(numel(Tuniq), Rcells);
-        for k=1:numel(Tuniq)
-            tk = Tuniq(k);
-            I  = find(t_list==tk & b_list<=tk);
-            if isempty(I), continue; end
-            w = w_fun(I);
-            A(k,I) = w / max(sum(w), eps);
-        end
-    case "cohort"
-        Guniq = axisVals;
-        A = zeros(numel(Guniq), Rcells);
-        for k=1:numel(Guniq)
-            gk = Guniq(k);
-            I  = find(b_list==gk & t_list>=gk);
-            if isempty(I), continue; end
-            % keep simple average for "byCohort" as in original
-            A(k,I) = 1/numel(I);
-        end
-    otherwise % "event"
-        Evals  = axisVals;
-        e_list = t_list - b_list;
-        A = zeros(numel(Evals), Rcells);
-        for k=1:numel(Evals)
-            ek = Evals(k);
-            I  = find(e_list==ek);
-            if isempty(I), continue; end
-            w = w_fun(I);
-            A(k,I) = w / max(sum(w), eps);
-        end
-end
-end
-
-function draws = build_draws_(axisVals, a_list, b_list, t_list, att_b, w_fun, kind, pick_post)
-B = size(att_b,2);
-
-% overall (single-number) case
-if nargin>=8 && strcmpi(string(kind),'overall')
-    draws = NaN(1,B);
-    I = find(pick_post);
-    if isempty(I), return; end
-    w = w_fun(I);
-    for b=1:B
-        draws(1,b) = nansum(w .* att_b(I,b)) / max(sum(w), eps);
-    end
-    return
-end
-
-knd = "event";
-if nargin>=7 && ~isempty(kind), knd = lower(string(kind)); end
-
-switch knd
-    case "calendar"
-        Tuniq = axisVals;
-        draws = NaN(numel(Tuniq), B);
-        for k=1:numel(Tuniq)
-            tk = Tuniq(k);
-            I  = find(t_list==tk & b_list<=tk);
-            if isempty(I), continue; end
-            w = w_fun(I);
-            for b=1:B
-                draws(k,b) = nansum(w .* att_b(I,b)) / max(sum(w), eps);
-            end
-        end
-
-    case "cohort"
-        Guniq = axisVals;
-        draws = NaN(numel(Guniq), B);
-        for k=1:numel(Guniq)
-            gk = Guniq(k);
-            I  = find(b_list==gk & t_list>=gk);
-            if isempty(I), continue; end
-            for b=1:B
-                draws(k,b) = mean(att_b(I,b), 'omitnan');  % keep simple average (as original)
-            end
-        end
-
-    otherwise  % "event"
-        Evals  = axisVals;
-        e_list = t_list - b_list;   % event-time offsets
-        draws  = NaN(numel(Evals), B);
-        for k=1:numel(Evals)
-            ek = Evals(k);
-            I  = find(e_list==ek);
-            if isempty(I), continue; end
-            w = w_fun(I);
-            for b=1:B
-                draws(k,b) = nansum(w .* att_b(I,b)) / max(sum(w), eps);
-            end
-        end
-end
-end
-
-function [SEv, tSv, pV, LB, UB] = var_from_S_lincombo_(theta, A, Sinfo)
-K = size(A,1); SEv = NaN(K,1); tSv = NaN(K,1); pV = NaN(K,1); LB = NaN(K,1); UB = NaN(K,1);
-if isempty(Sinfo), return; end
-crit = 1.96;
-if Sinfo.kind=="clustered"
-    S1 = Sinfo.S1; C1 = Sinfo.C1;
-    S1c = S1 - mean(S1,2);
-    for j=1:K
-        a = A(j,:).';
-        s = (a.' * S1c);
-        Var = (C1/(C1-1)) * sum(s.^2);
-        se = sqrt(Var); SEv(j)=se;
-        if isfinite(se) && se>0
-            tSv(j) = theta(j)/se;
-            pV(j)  = 2*(1-normcdf(abs(tSv(j))));
-            LB(j)  = theta(j) - crit*se;
-            UB(j)  = theta(j) + crit*se;
-        end
-    end
-else
-    S1 = Sinfo.S1; C1 = Sinfo.C1;
-    S2 = Sinfo.S2; C2 = Sinfo.C2;
-    S12= Sinfo.S12; C12= Sinfo.C12;
-    S1c  = S1  - mean(S1, 2);
-    S2c  = S2  - mean(S2, 2);
-    S12c = S12 - mean(S12,2);
-    for j=1:K
-        a = A(j,:).';
-        s1  = (a.' * S1c);   V1  = (C1 /(C1 -1)) * sum(s1.^2);
-        s2  = (a.' * S2c);   V2  = (C2 /(C2 -1)) * sum(s2.^2);
-        s12 = (a.' * S12c);  V12 = (C12/(C12-1)) * sum(s12.^2);
-        Var = V1 + V2 - V12;
-        se = sqrt(Var); SEv(j)=se;
-        if isfinite(se) && se>0
-            tSv(j) = theta(j)/se;
-            pV(j)  = 2*(1-normcdf(abs(tSv(j))));
-            LB(j)  = theta(j) - crit*se;
-            UB(j)  = theta(j) + crit*se;
-        end
-    end
-end
-end
-
-function [tab, crit] = agg_infer_(theta, draws)
-K = numel(theta);
-if isempty(draws)
-    tab = table(theta, NaN(K,1), NaN(K,1), NaN(K,1), NaN(K,1), NaN(K,1), ...
-        'VariableNames', {'Estimate','SE','tStat','pValue','LB','UB'});
-    crit = NaN; return;
-end
-dc = draws - mean(draws,2);
-SE = std(dc,0,2);
-tStat = theta ./ max(SE, eps);
-Z = abs((draws - theta) ./ max(SE, eps));
-thr = abs(tStat);
-pValue = mean(Z >= thr, 2);
-maxZ = max(Z, [], 1);
-crit = did.quantile(maxZ, 0.95);
-LB = theta - crit .* SE;
-UB = theta + crit .* SE;
-tab = table(theta, SE, tStat, pValue, LB, UB, ...
-    'VariableNames', {'Estimate','SE','tStat','pValue','LB','UB'});
-end
 
 % ---------- Cross-fitting utilities ----------
 

@@ -3,7 +3,7 @@ classdef WildBootstrap < did.vcov.VcovEngine
     % Uses estimator's design (X, y, idxD). No full covariance matrix is produced.
 
     properties
-        cluster (1,:) string = string.empty
+        clusterWild (1,:) string = string.empty
         B (1,1) double {mustBeInteger, mustBePositive} = 999
         multiplier (1,1) string = "mammen"
         studentize (1,1) logical = true
@@ -14,14 +14,14 @@ classdef WildBootstrap < did.vcov.VcovEngine
     methods
         function obj = WildBootstrap(args)
             arguments
-                args.cluster (1,:) string = string.empty
+                args.clusterWild (1,:) string = string.empty
                 args.B (1,1) double {mustBeInteger, mustBePositive} = 999
                 args.multiplier (1,1) string = "mammen"
                 args.studentize (1,1) logical = true
                 args.rngSeed double = NaN
                 args.smallSample (1,1) logical = true
             end
-            obj.cluster     = args.cluster;
+            obj.clusterWild     = args.clusterWild;
             obj.B           = args.B;
             obj.multiplier  = lower(args.multiplier);
             obj.studentize  = args.studentize;
@@ -48,12 +48,12 @@ classdef WildBootstrap < did.vcov.VcovEngine
             % ---- cluster vector ----
             if ~isprop(ds,'T'), return; end
             Ttbl = ds.T;
-            if isempty(obj.cluster)
+            if isempty(obj.clusterWild)
                 if ~isprop(ds,'idVar'), return; end
                 c = Ttbl.(ds.idVar);
             else
-                if ~ismember(obj.cluster, string(Ttbl.Properties.VariableNames)), return; end
-                c = Ttbl.(obj.cluster);
+                if ~ismember(obj.clusterWild, string(Ttbl.Properties.VariableNames)), return; end
+                c = Ttbl.(obj.clusterWild);
             end
             [~,~,g] = unique(c,'stable');
             G = max(g);

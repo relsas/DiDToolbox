@@ -22,11 +22,14 @@ classdef CH < did.estimators.Estimator
         ComputePlacebo (1,1) logical = true
         Seed (1,1) double = randi([1,1e7],1,1)
         WeightVar (1,1) string = ""     % optional weight variable in the input table
-        Print (1,1) logical = true
+        Display (1,1) logical = true
         Details (1,1) logical = false
         Covariates string = string.empty(1,0)
         CovarSample (1,1) string {mustBeMember(CovarSample,["D0","never","all"])} = "D0"
-    
+
+        % ---- Event Study options ----
+        Horizons double = []       % vector of lags k>=0 (e.g. [0 1 2])
+        Placebos double = []       % integer (count) or vector of leads k<0 (e.g. 2 or [-1 -2])
     end
 
     methods
@@ -41,13 +44,16 @@ classdef CH < did.estimators.Estimator
                     name = string(varargin{k});
                     val  = varargin{k+1};
                     switch lower(name)
-                        case 'display',        name = "Print";
-                        % case 'rngseed',        name = "Seed";
+                        case 'display',        name = "Display";
+                            % case 'rngseed',        name = "Seed";
                         case 'computeplacebo', name = "ComputePlacebo";
                         case 'weight',         name = "WeightVar";
                         case 'covariates',  name = "Covariates";
                         case 'x',           name = "Covariates";
                         case 'covarsample', name = "CovarSample";
+                        case 'horizons',    name = "Horizons";
+                        case 'dynamic',     name = "Horizons";
+                        case 'placebos',    name = "Placebos";
                     end
                     if isprop(obj, name)
                         obj.(name) = val;
@@ -72,11 +78,12 @@ classdef CH < did.estimators.Estimator
             % -- build NV args for functional core
             nv = {'idVar', idVar, 'timeVar', timeVar, 'yVar', yVar, 'dVar', dVar, ...
                 'B', obj.B, 'ComputePlacebo', obj.ComputePlacebo, 'Seed', obj.Seed, ...
-                'Print', obj.Print, 'Details', obj.Details, ...
-                'Covariates', obj.Covariates, 'CovarSample', obj.CovarSample};
+                'Display', obj.Display, 'Details', obj.Details, ...
+                'Covariates', obj.Covariates, 'CovarSample', obj.CovarSample, ...
+                'Horizons', obj.Horizons, 'Placebos', obj.Placebos};
 
             if strlength(obj.WeightVar) > 0 && any(strcmp(obj.WeightVar, T.Properties.VariableNames))
-                nv = [nv, {'WeightVar', obj.WeightVar}]; 
+                nv = [nv, {'WeightVar', obj.WeightVar}];
             end
 
             % -- delegate to functional core
@@ -96,7 +103,7 @@ classdef CH < did.estimators.Estimator
                     'B', obj.B, ...
                     'Seed', obj.Seed);
             end
-            
+
             out.Method = "didM/CH";
 
             % -- provide a rich summaryTable the Model can use directly
@@ -140,12 +147,12 @@ classdef CH < did.estimators.Estimator
         end
 
         function [idVar, timeVar, yVar, dVar] = getVarNames_(~, ds)
-        % Use Dataset metadata directly (no guessing, no defaults)
-        if isprop(ds, "idVar"),   idVar   = ds.idVar;   else, error("Dataset missing idVar");   end
-        if isprop(ds, "timeVar"), timeVar = ds.timeVar; else, error("Dataset missing timeVar"); end
-        if isprop(ds, "yVar"),    yVar    = ds.yVar;    else, error("Dataset missing yVar");    end
-        if isprop(ds, "dVar"),    dVar    = ds.dVar;    else, error("Dataset missing dVar");    end
-    end
+            % Use Dataset metadata directly (no guessing, no defaults)
+            if isprop(ds, "idVar"),   idVar   = ds.idVar;   else, error("Dataset missing idVar");   end
+            if isprop(ds, "timeVar"), timeVar = ds.timeVar; else, error("Dataset missing timeVar"); end
+            if isprop(ds, "yVar"),    yVar    = ds.yVar;    else, error("Dataset missing yVar");    end
+            if isprop(ds, "dVar"),    dVar    = ds.dVar;    else, error("Dataset missing dVar");    end
+        end
     end
 end
 % ============================================================

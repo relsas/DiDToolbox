@@ -27,6 +27,9 @@ end
 if ~isnumeric(T.(dVar)) && ~islogical(T.(dVar))
     error("did:validatePanel:Type", "%s must be numeric or logical.", dVar);
 end
+if ~isnumeric(T.(timeVar)) && ~iscategorical(T.(timeVar))
+    error("did:validatePanel:Type", "%s must be numeric or categorical", dVar);
+end
 
 % (Optional) weight presence/type if provided
 if strlength(wVar)>0

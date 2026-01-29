@@ -47,7 +47,7 @@ arguments
     opts.Weighting   (1,1) string {mustBeMember(opts.Weighting,["cohortShare","treatedObs"])} = "cohortShare"
 
     % I/O
-    opts.Print       (1,1) logical = true
+    opts.Display       (1,1) logical = true
 end
 
 % ---------- 1) Run CS engine to get ATT(g,t) + inference carriers ----------
@@ -63,7 +63,7 @@ nv = {
     'Studentize',opts.Studentize, ...
     'ClusterVar',opts.ClusterVar, 'ClusterVar2',opts.ClusterVar2, ...
     'Weighting',opts.Weighting, ...   % ← aggregation scheme (SA or DNWZ)
-    'Print',false ...
+    'Display',false ...
     };
 
 cs = did.cs_estimator(T, nv{:});
@@ -156,7 +156,7 @@ out.summaryTable = table(sumRows, effLab, est, se, tstat, pval, ...
     'VariableNames', {'Name','Effect','Estimate','SE','tStat','pValue'});
 
 % Pretty print (compact)
-if opts.Print
+if opts.Display
     fprintf('[IW] %s\n', out.Method);
     if isfield(out,'es') && istable(out.es)
         K = height(out.es);
