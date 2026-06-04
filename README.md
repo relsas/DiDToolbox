@@ -12,12 +12,19 @@ Code and Description for a Difference-in-Differences (DiD) Toolbox for Matlab
 
 ## Install
 
-**Option A (source)**: Clone/download and in MATLAB:
+**Recommended (toolbox installer)**: Download the latest MATLAB toolbox package:
 
-addpath(genpath('/path/to/YourToolbox'))
+[DIDToolbox.mltbx](https://github.com/relsas/DiDToolbox/releases/latest/download/DIDToolbox.mltbx)
 
+Open the downloaded `.mltbx` file in MATLAB to install the toolbox.
 
-**Option B (toolbox)**: Download the .mltbx from the latest Github release and simply open form inside Matlab to install
+**Alternative (source)**: Clone/download the repository and in MATLAB run:
+
+```matlab
+addpath(genpath('/path/to/DIDToolbox'))
+```
+
+The source tree is useful for inspecting the code, examples, tests, and documentation. For normal installation, the `.mltbx` file is the intended download.
 
 
 
